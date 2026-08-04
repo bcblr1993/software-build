@@ -24,11 +24,16 @@ set -uo pipefail
 BASELINE="${1:?用法: abi-gate.sh <基线glibc版本> <路径>...}"
 shift
 
-# glibc 核心库：任何 Linux 都提供，且 glibc 保证向后兼容
-CORE_LIBS="libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1"
+# glibc 核心库：任何 Linux 都提供，且 glibc 保证向后兼容。
+#
+# libcrypt.so.1 归入此类而非随包分发：它是 glibc 的组成部分，目标系统
+# （glibc 2.17 ~ 2.34）全部提供。实测把 CentOS 7 的版本复制进包反而更糟 ——
+# 那份 libcrypt 链接了 NSS 的 libfreebl3.so，目标系统更没有。
+CORE_LIBS="libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1 libcrypt.so.1"
 
-# 必须随包分发的库：目标系统或者没有，或者小版本不一致
-VENDORED_LIBS="libssl.so.1.1 libcrypto.so.1.1 libpcre2-8.so.0 libpcre.so.1 libz.so.1 libstdc++.so.6 libgcc_s.so.1 libcrypt.so.1"
+# 必须随包分发的库：目标系统或者没有，或者小版本不一致。
+# 实测各目标系统的 OpenSSL 为 1.1.1m / 1.1.1f / 1.1.1wa，互不相同。
+VENDORED_LIBS="libssl.so.1.1 libcrypto.so.1.1 libpcre2-8.so.0 libpcre.so.1 libz.so.1 libstdc++.so.6 libgcc_s.so.1"
 
 pass=0
 fail=0
@@ -114,6 +119,22 @@ check_binary() {
     else
       log_ok "RUNPATH 相对可迁移 [$rpath]"
     fi
+
+    # ---- 4. 声明自带的库必须确实存在于包内 ----
+    # 只声明不注入的话，在装有同名库的系统上照常运行，换到精简系统才失败。
+    # nginx 依赖的 libcrypt.so.1 就曾如此：多数系统由 glibc 提供，
+    # 而 glibc 2.38 起已将其剥离到 libxcrypt，精简安装即可能缺失。
+    local libdir="$(dirname "$bin")/../lib"
+    for lib in $needed; do
+      case " $VENDORED_LIBS " in
+        *" $lib "*) ;;
+        *) continue ;;
+      esac
+      if [ ! -e "$libdir/$lib" ]; then
+        log_fail "声明随包分发的 $lib 并未出现在包内 lib/ —— 实际仍在依赖目标系统"
+        ok=0
+      fi
+    done
   fi
 
   [ "$ok" = 1 ] && pass=$((pass + 1))

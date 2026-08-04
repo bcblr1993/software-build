@@ -78,6 +78,17 @@ for lib in libssl.so.1.1 libcrypto.so.1.1 libpcre2-8.so.0 libz.so.1; do
   done
 done
 
+# 不随包分发 libcrypt.so.1。
+#
+# 它由 http_auth_basic 的 crypt() 引入，看似也该自带，但实测证明相反：
+# CentOS 7 基线上的 libcrypt 属于 glibc，且链接了 NSS 的 libfreebl3.so。
+# 把它复制进包里，等于给包引入了一个目标系统更没有的依赖 ——
+# 在凝思 6.0.99 上直接报 libfreebl3.so 缺失，比不自带更糟。
+#
+# libcrypt.so.1 是 glibc 的组成部分，目标系统（glibc 2.17 ~ 2.34）全部提供，
+# 因此保持由系统解析。自包含有其边界：只对发行版之间确实存在差异的库
+# （OpenSSL、PCRE2、zlib）才值得随包分发。
+
 # ── 自检 ────────────────────────────────────────────────────────────
 log "自检"
 "$DEST/sbin/nginx" -v 2>&1 || true
