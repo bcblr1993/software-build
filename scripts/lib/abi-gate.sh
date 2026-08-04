@@ -29,18 +29,37 @@ shift
 # libcrypt.so.1 归入此类而非随包分发：它是 glibc 的组成部分，目标系统
 # （glibc 2.17 ~ 2.34）全部提供。实测把 CentOS 7 的版本复制进包反而更糟 ——
 # 那份 libcrypt 链接了 NSS 的 libfreebl3.so，目标系统更没有。
-#
-# libstdc++.so.6 与 libgcc_s.so.1 同样归入此类：GCC 承诺二者 ABI 向后兼容，
-# 基线为 gcc 4.8.5 而目标系统均在 7.3 以上，用系统版本即可。
-CORE_LIBS="libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1 libcrypt.so.1 libstdc++.so.6 libgcc_s.so.1"
+CORE_LIBS="libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1 libcrypt.so.1"
 
 # 必须随包分发的库：目标系统或者没有，或者小版本不一致。
-# 实测各目标系统的 OpenSSL 为 1.1.1m / 1.1.1f / 1.1.1wa，互不相同。
-VENDORED_LIBS="libssl.so.1.1 libcrypto.so.1.1 libpcre2-8.so.0 libpcre.so.1 libz.so.1"
+# 实测各目标系统的 OpenSSL 为 1.1.1m / 1.1.1f / 1.1.1wa，互不相同；
+# Anolis 8.6 最小安装中没有 libstdc++.so.6；
+# CentOS 7 的 zlib 为 1.2.7，缺 Erlang 虚拟机所需的 ZLIB_1.2.7.1 符号。
+VENDORED_LIBS="libssl.so.1.1 libcrypto.so.1.1 libpcre2-8.so.0 libpcre.so.1 libz.so.1 libstdc++.so.6 libgcc_s.so.1 libtinfo.so.5"
 
 pass=0
 fail=0
 warn=0
+
+# 豁免清单：上游夹带的、不在运行路径上的可选组件
+EXCEPTIONS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gate-exceptions.txt"
+
+# 判断某个二进制的某个缺失库是否已登记豁免
+is_excepted() {
+  local bin="$1" lib="$2" path_pat allow_lib reason
+  [ -f "$EXCEPTIONS_FILE" ] || return 1
+  while IFS='|' read -r path_pat allow_lib reason; do
+    path_pat="$(printf '%s' "$path_pat" | tr -d '[:space:]')"
+    allow_lib="$(printf '%s' "$allow_lib" | tr -d '[:space:]')"
+    [ -z "$path_pat" ] && continue
+    case "$path_pat" in '#'*) continue ;; esac
+    if [[ "$bin" == *"$path_pat"* ]] && [ "$lib" = "$allow_lib" ]; then
+      EXCEPT_REASON="$(printf '%s' "$reason" | sed 's/^ *//')"
+      return 0
+    fi
+  done < "$EXCEPTIONS_FILE"
+  return 1
+}
 
 log_ok()   { printf '  [OK]   %s\n' "$*"; }
 log_fail() { printf '  [FAIL] %s\n' "$*"; fail=$((fail + 1)); }
@@ -102,6 +121,10 @@ check_binary() {
     case "$lib" in
       ld-linux*.so*|ld64.so*) continue ;;
     esac
+    if is_excepted "$bin" "$lib"; then
+      log_warn "依赖 $lib，已豁免：$EXCEPT_REASON"
+      continue
+    fi
     log_fail "依赖发行版特有库 $lib —— 目标系统可能没有或版本不符"
     ok=0
   done
@@ -123,18 +146,33 @@ check_binary() {
       log_ok "RUNPATH 相对可迁移 [$rpath]"
     fi
 
-    # ---- 4. 声明自带的库必须确实存在于包内 ----
-    # 只声明不注入的话，在装有同名库的系统上照常运行，换到精简系统才失败。
-    # nginx 依赖的 libcrypt.so.1 就曾如此：多数系统由 glibc 提供，
-    # 而 glibc 2.38 起已将其剥离到 libxcrypt，精简安装即可能缺失。
-    local libdir="$(dirname "$bin")/../lib"
+    # ---- 4. 声明自带的库必须确实能从 RUNPATH 解析到 ----
+    #
+    # 只声明不注入的话，在装有同名库的系统上照常运行，换到精简系统才失败：
+    # Anolis 8.6 最小安装没有 libstdc++.so.6，redis 就是这样暴露的。
+    #
+    # 按 RUNPATH 逐段展开 $ORIGIN 来找，而不是假定库固定在 ../lib ——
+    # RabbitMQ 的 beam.smp 指向的是 $ORIGIN/../../../runtime-libs。
+    local origin found seg
+    origin="$(dirname "$bin")"
     for lib in $needed; do
       case " $VENDORED_LIBS " in
         *" $lib "*) ;;
         *) continue ;;
       esac
-      if [ ! -e "$libdir/$lib" ]; then
-        log_fail "声明随包分发的 $lib 并未出现在包内 lib/ —— 实际仍在依赖目标系统"
+      found=0
+      local IFS_SAVE="$IFS"
+      IFS=':'
+      for seg in $rpath; do
+        IFS="$IFS_SAVE"
+        seg="${seg//\$ORIGIN/$origin}"
+        seg="${seg//\$\{ORIGIN\}/$origin}"
+        [ -e "$seg/$lib" ] && { found=1; break; }
+        IFS=':'
+      done
+      IFS="$IFS_SAVE"
+      if [ "$found" = 0 ]; then
+        log_fail "声明随包分发的 $lib 无法从 RUNPATH 解析到 —— 实际仍在依赖目标系统"
         ok=0
       fi
     done
