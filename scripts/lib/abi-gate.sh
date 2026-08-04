@@ -29,11 +29,14 @@ shift
 # libcrypt.so.1 归入此类而非随包分发：它是 glibc 的组成部分，目标系统
 # （glibc 2.17 ~ 2.34）全部提供。实测把 CentOS 7 的版本复制进包反而更糟 ——
 # 那份 libcrypt 链接了 NSS 的 libfreebl3.so，目标系统更没有。
-CORE_LIBS="libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1 libcrypt.so.1"
+#
+# libstdc++.so.6 与 libgcc_s.so.1 同样归入此类：GCC 承诺二者 ABI 向后兼容，
+# 基线为 gcc 4.8.5 而目标系统均在 7.3 以上，用系统版本即可。
+CORE_LIBS="libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1 libcrypt.so.1 libstdc++.so.6 libgcc_s.so.1"
 
 # 必须随包分发的库：目标系统或者没有，或者小版本不一致。
 # 实测各目标系统的 OpenSSL 为 1.1.1m / 1.1.1f / 1.1.1wa，互不相同。
-VENDORED_LIBS="libssl.so.1.1 libcrypto.so.1.1 libpcre2-8.so.0 libpcre.so.1 libz.so.1 libstdc++.so.6 libgcc_s.so.1"
+VENDORED_LIBS="libssl.so.1.1 libcrypto.so.1.1 libpcre2-8.so.0 libpcre.so.1 libz.so.1"
 
 pass=0
 fail=0

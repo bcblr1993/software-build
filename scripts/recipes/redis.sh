@@ -71,14 +71,16 @@ for lib in libssl.so.1.1 libcrypto.so.1.1; do
   done
 done
 
-# libstdc++ 与 libgcc_s 来自基线镜像的 gcc 4.8.5，目标系统的版本更新，
-# 本可直接使用；但随包分发可消除"目标系统未装 gcc 运行时"的可能。
-for lib in libstdc++.so.6 libgcc_s.so.1; do
-  src_lib="$(gcc -print-file-name=$lib 2>/dev/null || true)"
-  if [ -n "$src_lib" ] && [ -e "$src_lib" ] && [ "$src_lib" != "$lib" ]; then
-    cp -aL "$src_lib" "$DEST/lib/" 2>/dev/null || true
-  fi
-done
+# 不随包分发 libstdc++ 与 libgcc_s。
+#
+# GCC 对这两个库承诺 ABI 向后兼容：新版可运行旧版编译的程序。基线是
+# gcc 4.8.5，而目标系统均为 gcc 7.3 及以上，直接使用系统版本即可。
+#
+# 自带反而有害：复制来的是预编译库，其自身没有 $ORIGIN rpath，
+# libstdc++ 又依赖 libgcc_s，两者的解析将退回系统路径 —— 既没获得
+# 自包含的好处，又多了两个可能与系统版本冲突的文件。
+# 与 nginx 处不自带 libcrypt 同理：只有发行版之间确实存在差异的库
+# （OpenSSL、PCRE2、zlib）才值得随包分发。
 
 # ── 自检 ────────────────────────────────────────────────────────────
 log "自检"

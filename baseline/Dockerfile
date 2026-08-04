@@ -55,6 +55,21 @@ RUN set -eux; \
     yum clean all; \
     rm -rf /var/cache/yum
 
+# patchelf 用于给上游预编译二进制补 rpath —— RabbitMQ 自带的 Erlang 虚拟机
+# beam.smp 无法重新编译，只能改写其 RUNPATH 令其加载随包分发的库。
+# CentOS 7 已 EOL，EPEL 同样只能走归档源。
+RUN set -eux; \
+    printf '%s\n' \
+      '[epel]' \
+      'name=EPEL 7 (archive)' \
+      "baseurl=https://mirrors.aliyun.com/epel-archive/7/\$basearch/" \
+      'gpgcheck=0' \
+      'enabled=1' \
+      > /etc/yum.repos.d/epel.repo; \
+    yum install -y patchelf; \
+    yum clean all; \
+    rm -rf /var/cache/yum
+
 # 构建产物统一落在 /out，源码解压在 /build，自带库装到 /opt/sysroot
 RUN mkdir -p /out /build /opt/sysroot
 

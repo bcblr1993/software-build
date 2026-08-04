@@ -20,6 +20,10 @@ declare -A PROBE=(
   [nginx]="sbin/nginx -v"
   [keepalived]="sbin/keepalived --version"
   [redis]="bin/redis-server --version"
+  # 直接探测 Erlang 虚拟机本身：RabbitMQ 运行其上，它起不来则一切免谈。
+  # 上游预编译的 beam.smp 曾因 libtinfo.so.5 与 zlib 符号版本在三个目标
+  # 系统上全部无法启动，属最关键的验证项。
+  [rabbitmq]="lib/erts-*/bin/beam.smp -V"
 )
 
 arch_of_image() {
@@ -33,8 +37,9 @@ arch_of_image() {
 # 在容器里跑一个组件的版本探测，回显单行结果
 probe_one() {
   local image="$1" mount="$2" comp="$3" cmd="$4"
+  # 命令中可能含通配符（如 erts-*），交由容器内的 shell 展开
   docker run --rm -v "$mount:/pkg:ro" "$image" \
-    bash -c "cd /pkg/$comp 2>/dev/null && ./$cmd 2>&1 | head -1" 2>&1 | tail -1
+    bash -c "cd /pkg/$comp 2>/dev/null && eval ./$cmd 2>&1 | head -1" 2>&1 | tail -1
 }
 
 images=$(docker images --format '{{.Repository}}:{{.Tag}}' \
