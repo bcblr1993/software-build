@@ -1,0 +1,6 @@
+#!/bin/bash
+# 提交前自动执行敏感信息扫描。
+# 启用方式（clone 后执行一次）：git config core.hooksPath .githooks
+set -e
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/scripts/lib/secrets-scan.sh" staged

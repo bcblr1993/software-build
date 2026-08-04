@@ -1,0 +1,163 @@
+# SprixinSoft 离线安装包组件清单
+#
+# 这是整套构建系统的唯一事实来源。
+# 升级任何组件，只需修改这里的 version 与 sha256，然后触发构建。
+#
+# 兼容性策略：
+#   所有需编译的组件均在 glibc 2.17 (CentOS 7) 基线上构建，并把
+#   OpenSSL / PCRE2 / zlib 随包分发，通过 $ORIGIN 相对 rpath 加载。
+#   由此产出的二进制不依赖目标系统的发行版、小版本或补丁号，
+#   可运行于任何 glibc >= 2.17 的 Linux。
+#   该结论由 abi-gate 在每次构建后以 readelf 断言强制校验。
+
+package:
+  name: sprixinSoft
+  version: v14
+  # 安装后的顶层目录名。不要修改：现场安装目录结构依赖它。
+  top_dir: sprixinSoft
+
+baseline:
+  # 目标系统实测 glibc：CentOS 7 = 2.17，凝思 6.0.99 = 2.28，
+  # 凝思 6.0.99 EL22.03 = 2.34，麒麟 V10 SP2 = 2.28。取最低者为基线。
+  glibc_max: "2.17"
+  images:
+    x86_64: sprixin-baseline:centos7-x86_64
+    aarch64: sprixin-baseline:centos7-aarch64
+
+architectures:
+  - x86_64
+  - aarch64
+
+# 随包分发的运行库。目标系统各自带的 OpenSSL 小版本互不相同
+# (凝思 SP3 = 1.1.1m, 凝思 EL22.03 = 1.1.1wa, 麒麟 V10 = 1.1.1f)，
+# 自带后彻底摆脱该差异，且 OpenSSL 被安全扫描点名时可自主升级。
+vendored_libs:
+  openssl:
+    version: "1.1.1w"
+    url: https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz
+    sha256: cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8
+    configure:
+      - no-shared-default
+      - shared
+      - no-tests
+  pcre2:
+    version: "10.44"
+    url: https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.44/pcre2-10.44.tar.gz
+    sha256: 86b9cb0aa3bcb7994faa88018292bc704cdbb708e785f7c74352ff6ea7d3175b
+  zlib:
+    version: "1.3.1"
+    url: https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+    sha256: 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+
+components:
+
+  nginx:
+    build: compile
+    version: "1.31.3"
+    url: https://nginx.org/download/nginx-{version}.tar.gz
+    sha256: a7657c50811c2d92d9895395e8b873ef60398142c4db21eb647811c38f6dd525
+    # 保持与现有包一致，勿改：现场 nginx.conf 与启停脚本依赖该前缀
+    configure:
+      - --prefix=/home/sprixin/nginx
+      - --with-http_ssl_module
+      - --with-http_v2_module
+    vendor: [openssl, pcre2, zlib]
+    # 安装后二进制位置，供 abi-gate 与 verify 定位
+    artifacts: [sbin/nginx]
+
+  redis:
+    build: compile
+    # 注意：现有 x86 包为 8.2.6、ARM 包为 8.2.3，版本漂移。此处统一。
+    version: "8.2.6"
+    url: https://github.com/redis/redis/archive/refs/tags/{version}.tar.gz
+    sha256: 78dd7326c5c959202c6c3849d3ea9c61896d78d647c20f6542b52c0917f96eac
+    vendor: [openssl]
+    artifacts:
+      - bin/redis-server
+      - bin/redis-cli
+      - bin/redis-sentinel
+      - bin/redis-check-aof
+      - bin/redis-check-rdb
+      - bin/redis-benchmark
+
+  keepalived:
+    build: compile
+    version: "2.3.4"
+    url: https://www.keepalived.org/software/keepalived-{version}.tar.gz
+    sha256: 6afd95ddb7d3e0d3b8b8e5b3a489144131b61a01b06d29e883d0c44acc8a36bf
+    # 保持与现有包一致。--disable-lvs 等参数把内核依赖面压到最小，
+    # 只剩 VRRP 的 netlink + socket，属最稳定的内核 ABI。
+    configure:
+      - --disable-lvs
+      - --disable-nftables
+      - --disable-iptables
+      - --disable-dbus
+      - --disable-snmp
+      - --disable-systemd
+      - --disable-track-process
+      - --enable-json
+      - --enable-log-file
+    # CentOS 7 基线内核头(3.10)缺这两个 setsockopt 选项号。
+    # 它们是固定不变的内核 ABI 常量，编译期定义即可，运行时内核支持就生效。
+    cppflags:
+      - -DIPV6_TRANSPARENT=75
+      - -DIPV6_FREEBIND=78
+    # 现有 x86 包链接了 libcrypto.so.1.0.0，而目标系统只提供 1.1.1，
+    # 且 ISO 未提供 compat-openssl10 —— 自带 OpenSSL 后该缺陷消失。
+    vendor: [openssl]
+    artifacts: [sbin/keepalived]
+
+  rabbitmq:
+    # 官方 generic-unix 包自带 Erlang/OTP，只需对自带 OpenSSL 重建 crypto NIF
+    build: relink-nif
+    version: "4.2.7"
+    url: https://github.com/rabbitmq/rabbitmq-server/releases/download/v{version}/rabbitmq-server-generic-unix-{version}.tar.xz
+    sha256: 35a1b1699d8369e0c63d31676978ffa98d171855e21d662170ae91dcfc3557b1
+    otp_tag: OTP-26.2.5.18
+    nifs:
+      - crypto.so
+      - crypto_callback.so
+      - otp_test_engine.so
+    vendor: [openssl]
+
+  # 以下组件为 Java / Go 产物，本身不链接系统库，跨发行版通用，
+  # 升级时直接替换上游归档即可，无需编译。
+  nacos:
+    build: repack
+    version: "2.2.3"
+    url: https://github.com/alibaba/nacos/releases/download/{version}/nacos-server-{version}.tar.gz
+    sha256: LOCK
+
+  influxdb:
+    build: repack
+    version: "1.7.8"
+    url_per_arch:
+      x86_64: https://dl.influxdata.com/influxdb/releases/influxdb-{version}_linux_amd64.tar.gz
+      aarch64: https://dl.influxdata.com/influxdb/releases/influxdb-{version}_linux_arm64.tar.gz
+    sha256: LOCK
+
+  chronograf:
+    build: repack
+    version: "1.10.1"
+    url_per_arch:
+      x86_64: https://dl.influxdata.com/chronograf/releases/chronograf-{version}_linux_amd64.tar.gz
+      aarch64: https://dl.influxdata.com/chronograf/releases/chronograf-{version}_linux_arm64.tar.gz
+    sha256: LOCK
+
+  jdk:
+    build: repack
+    # JDK 为二进制发行版，x86 与 ARM 版本号不同源，分别指定
+    version_per_arch:
+      x86_64: "8u181"
+      aarch64: "8u351"
+    local_only: true
+    note: 上游需授权下载，从 cache/ 提供本地归档
+
+# 安装包内的静态文件，来自 overlay/，打包时原样复制。
+# install.sh / startup.sh / shutdown.sh 的行为必须与现有包保持一致。
+overlay_files:
+  - install.sh
+  - startup.sh
+  - shutdown.sh
+  - verify.sh
+  - KEEPALIVED-USAGE.md

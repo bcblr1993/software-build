@@ -1,0 +1,57 @@
+# ── 敏感信息（务必保持在仓库之外）────────────────────────────
+# 本项目面向公开仓库，以下内容一旦提交即等同泄露。
+secrets/
+*.secret
+.env
+.env.*
+!.env.example
+# TOTP 种子与会话密钥
+web/instance/
+web/*.db
+web/*.sqlite*
+totp.json
+# SSH 私钥与凭据
+*.pem
+*.key
+!**/testdata/*.key
+id_rsa*
+known_hosts
+# 构建产生的 SOURCE 文件含默认账号口令，属产物不属源码
+dist/**/SOURCE-*.txt
+
+# ── 大体积产物与缓存 ─────────────────────────────────────────
+cache/
+dist/
+work/
+*.iso
+*.qcow2
+*.img
+*.tar
+*.tar.gz
+*.tar.xz
+*.rpm
+*.deb
+# 但保留仓库自带的小体积样例
+!docs/**/*.tar.gz
+
+# ── 构建与运行时残留 ─────────────────────────────────────────
+*.log
+*.pid
+logs/
+evidence/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+
+# ── 编辑器与系统 ─────────────────────────────────────────────
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+
+# ── 本地工具配置 ─────────────────────────────────────────────
+.claude/settings.local.json
+.claude/scheduled_tasks*
