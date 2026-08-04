@@ -61,8 +61,11 @@ RUN mkdir -p /out /build /opt/sysroot
 WORKDIR /build
 
 # 让配方默认能找到自带库
+# CentOS 7 的镜像未附带 C.UTF-8，设成它会让 perl 在每次调用时告警，
+# 干扰 OpenSSL 的 Configure 输出。C 是各发行版都保证存在的。
 ENV SYSROOT=/opt/sysroot \
     PKG_CONFIG_PATH=/opt/sysroot/lib/pkgconfig \
-    LANG=C.UTF-8
+    LANG=C \
+    LC_ALL=C
 
 CMD ["/bin/bash"]
