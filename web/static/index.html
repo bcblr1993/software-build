@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SprixinSoft 构建控制台</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #fff;
+    --line: #e3e6ea;
+    --text: #1c2024;
+    --muted: #6b7280;
+    --accent: #1f6feb;
+    --ok: #1a7f4b;
+    --bad: #b42318;
+    --warn: #9a6400;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 14px 24px; display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  header .spacer { flex: 1; }
+  main { max-width: 1120px; margin: 0 auto; padding: 24px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 20px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .card .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: none; }
+  input[type=text], input[type=password] {
+    font: inherit; padding: 6px 10px; border: 1px solid var(--line);
+    border-radius: 6px; background: #fff; color: var(--text); width: 100%;
+  }
+  input.ver { font-family: var(--mono); font-size: 13px; }
+  input:focus { outline: 2px solid rgba(31,111,235,.25); border-color: var(--accent); }
+  button {
+    font: inherit; padding: 7px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; color: var(--text);
+  }
+  button:hover { background: #f2f4f7; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.06); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 12px; background: #eef1f5; color: var(--muted);
+  }
+  .tag.ok { background: #e7f6ed; color: var(--ok); }
+  .tag.bad { background: #fdecea; color: var(--bad); }
+  .tag.warn { background: #fdf4e3; color: var(--warn); }
+  .tag.run { background: #e8f0fe; color: var(--accent); }
+  #log {
+    background: #10151b; color: #d7dde5; font-family: var(--mono); font-size: 12px;
+    padding: 14px; border-radius: 6px; height: 380px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all; line-height: 1.55;
+  }
+  #log .e { color: #ff8c82; }
+  #log .s { color: #7ee2a8; }
+  #log .h { color: #8ab4ff; }
+  .hist { border-left: 2px solid var(--line); padding-left: 14px; margin-bottom: 16px; }
+  .hist.pass { border-left-color: var(--ok); }
+  .hist.fail { border-left-color: var(--bad); }
+  .center { max-width: 400px; margin: 60px auto; }
+  .code-input {
+    font-family: var(--mono); font-size: 26px; letter-spacing: 10px;
+    text-align: center; padding: 12px;
+  }
+  .secret {
+    font-family: var(--mono); font-size: 15px; background: #f2f4f7;
+    padding: 12px; border-radius: 6px; word-break: break-all; user-select: all;
+  }
+  .hide { display: none; }
+  .err { color: var(--bad); font-size: 13px; min-height: 20px; }
+  .note { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div id="gate" class="center">
+  <div class="card">
+    <h2 id="gate-title">管理员登录</h2>
+    <p class="sub" id="gate-sub">请输入验证器上的 6 位动态验证码</p>
+
+    <div id="enroll" class="hide">
+      <p class="note">用验证器扫码或手动添加以下密钥（时间型 / TOTP / 6 位 / 30 秒）：</p>
+      <div class="secret" id="secret-text"></div>
+      <p class="note" style="margin-top:10px">添加地址（可粘贴到验证器）：</p>
+      <div class="secret" id="secret-uri" style="font-size:12px"></div>
+      <p class="note" style="margin-top:14px">添加完成后，输入验证器显示的验证码完成绑定：</p>
+    </div>
+
+    <input id="code" class="code-input" type="text" inputmode="numeric"
+           maxlength="6" placeholder="000000" autocomplete="one-time-code">
+    <p class="err" id="gate-err"></p>
+    <div class="row">
+      <button class="primary" id="gate-btn" style="flex:1">登录</button>
+    </div>
+  </div>
+</div>
+
+<div id="app" class="hide">
+<header>
+  <h1>SprixinSoft 构建控制台</h1>
+  <span class="meta" id="pkg-meta"></span>
+  <span class="spacer"></span>
+  <span class="meta" id="busy-state"></span>
+  <button id="logout">退出</button>
+</header>
+
+<main>
+  <div class="card">
+    <h2>组件版本矩阵</h2>
+    <p class="sub" id="baseline-meta"></p>
+    <table>
+      <thead>
+        <tr><th style="width:20%">组件</th><th style="width:16%">构建方式</th>
+            <th style="width:24%">版本</th><th style="width:26%">随包库</th>
+            <th style="width:14%">校验和</th></tr>
+      </thead>
+      <tbody id="comp-body"></tbody>
+    </table>
+    <div class="row" style="margin-top:16px">
+      <button class="primary" id="save-btn">保存版本变更</button>
+      <span class="note" id="save-msg"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>构建</h2>
+    <p class="sub">修改版本号后保存，再选择架构触发构建。产物、校验和与验证结果自动入库。</p>
+    <div class="row">
+      <label class="row" style="gap:6px"><input type="radio" name="arch" value="x86_64" checked> x86_64</label>
+      <label class="row" style="gap:6px"><input type="radio" name="arch" value="aarch64"> aarch64</label>
+      <span style="flex:1"></span>
+      <button class="primary" id="build-btn">开始构建</button>
+    </div>
+    <div id="log" style="margin-top:16px">等待构建…</div>
+  </div>
+
+  <div class="card">
+    <h2>版本沿革</h2>
+    <p class="sub">每次构建自动记录组件变化、产物校验和与目标系统验证结果</p>
+    <div id="hist-body"><p class="note">尚无构建记录</p></div>
+  </div>
+</main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (path, opts) => {
+  const r = await fetch(path, Object.assign({headers: {'Content-Type': 'application/json'}}, opts));
+  let d = {};
+  try { d = await r.json(); } catch (e) {}
+  return {ok: r.ok, status: r.status, data: d};
+};
+
+let state = {bound: false, authed: false};
+
+async function refreshStatus() {
+  const {data} = await api('/api/status');
+  state.bound = data.bound;
+  state.authed = data.authenticated;
+  if (data.authenticated) {
+    $('#gate').classList.add('hide');
+    $('#app').classList.remove('hide');
+    $('#busy-state').textContent = data.busy ? '构建进行中' : '';
+    loadComponents();
+    loadHistory();
+    if (data.busy) attachLog();
+  } else {
+    $('#gate').classList.remove('hide');
+    $('#app').classList.add('hide');
+    if (!data.bound) startEnroll();
+  }
+}
+
+async function startEnroll() {
+  $('#gate-title').textContent = '绑定验证器';
+  $('#gate-sub').textContent = '首次使用需绑定一个动态验证码应用';
+  $('#gate-btn').textContent = '完成绑定';
+  $('#enroll').classList.remove('hide');
+  const {ok, data} = await api('/api/enroll/begin', {method: 'POST'});
+  if (ok) {
+    $('#secret-text').textContent = data.secret_grouped;
+    $('#secret-uri').textContent = data.uri;
+  } else {
+    $('#gate-err').textContent = data.error || '无法开始绑定';
+  }
+}
+
+$('#gate-btn').onclick = async () => {
+  const code = $('#code').value.trim();
+  if (code.length !== 6) { $('#gate-err').textContent = '请输入 6 位验证码'; return; }
+  $('#gate-err').textContent = '';
+  const path = state.bound ? '/api/login' : '/api/enroll/confirm';
+  const {ok, data} = await api(path, {method: 'POST', body: JSON.stringify({code})});
+  if (ok) { $('#code').value = ''; refreshStatus(); }
+  else $('#gate-err').textContent = data.error || '验证失败';
+};
+
+$('#code').addEventListener('keydown', e => { if (e.key === 'Enter') $('#gate-btn').click(); });
+
+$('#logout').onclick = async () => { await api('/api/logout', {method: 'POST'}); location.reload(); };
+
+async function loadComponents() {
+  const {ok, data} = await api('/api/components');
+  if (!ok) return;
+  $('#pkg-meta').textContent = `${data.package.name} ${data.package.version}`;
+  const libs = Object.entries(data.vendored_libs).map(([n, l]) => `${n} ${l.version}`).join(' · ');
+  $('#baseline-meta').textContent =
+    `基线 glibc ${data.baseline.glibc_max} — 产物可运行于任何 glibc ≥ ${data.baseline.glibc_max} 的 Linux；随包库：${libs}`;
+
+  $('#comp-body').innerHTML = data.components.map(c => {
+    const ver = c.version || Object.values(c.version_per_arch || {}).join(' / ') || '-';
+    const editable = c.build !== 'repack' || true;
+    const kind = {compile: '基线编译', 'relink-nif': 'NIF 重链', repack: '直接替换'}[c.build] || c.build;
+    return `<tr>
+      <td><strong>${c.name}</strong></td>
+      <td><span class="tag">${kind}</span></td>
+      <td><input class="ver" data-comp="${c.name}" value="${ver}" ${c.version ? '' : 'disabled'}></td>
+      <td class="note">${(c.vendor || []).join(', ') || '—'}</td>
+      <td>${c.locked ? '<span class="tag ok">已锁定</span>' : '<span class="tag warn">未锁定</span>'}</td>
+    </tr>`;
+  }).join('');
+}
+
+$('#save-btn').onclick = async () => {
+  const updates = {};
+  document.querySelectorAll('input.ver').forEach(i => {
+    if (!i.disabled) updates[i.dataset.comp] = {version: i.value.trim()};
+  });
+  const {ok, data} = await api('/api/components', {method: 'POST', body: JSON.stringify({updates})});
+  $('#save-msg').textContent = ok
+    ? `已更新 ${data.changed.length} 项`
+    : (data.error || '保存失败');
+  if (ok) loadComponents();
+};
+
+let es = null;
+function attachLog() {
+  if (es) es.close();
+  $('#log').textContent = '';
+  es = new EventSource('/api/build/log');
+  es.onmessage = ev => {
+    const line = JSON.parse(ev.data).line;
+    if (line.startsWith('__DONE__')) {
+      const rc = line.split(' ')[1];
+      appendLog(rc === '0' ? '构建完成' : `构建失败（退出码 ${rc}）`, rc === '0' ? 's' : 'e');
+      es.close(); es = null;
+      $('#build-btn').disabled = false;
+      $('#busy-state').textContent = '';
+      loadHistory();
+      return;
+    }
+    appendLog(line);
+  };
+  es.onerror = () => { if (es) { es.close(); es = null; } $('#build-btn').disabled = false; };
+}
+
+function appendLog(line, cls) {
+  const el = $('#log');
+  const div = document.createElement('div');
+  if (!cls) {
+    if (/\[FAIL\]|失败|error|Error|拒绝出包/.test(line)) cls = 'e';
+    else if (/\[OK\]|通过|完成/.test(line)) cls = 's';
+    else if (/^─|^>>>|^\s*$/.test(line) || /^ /.test(line)) cls = 'h';
+  }
+  if (cls) div.className = cls;
+  div.textContent = line;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+$('#build-btn').onclick = async () => {
+  const arch = document.querySelector('input[name=arch]:checked').value;
+  $('#build-btn').disabled = true;
+  const {ok, data} = await api('/api/build', {method: 'POST', body: JSON.stringify({arch, components: []})});
+  if (!ok) {
+    appendLog(data.error || data.message || '无法启动构建', 'e');
+    $('#build-btn').disabled = false;
+    return;
+  }
+  $('#busy-state').textContent = '构建进行中';
+  attachLog();
+};
+
+async function loadHistory() {
+  const {ok, data} = await api('/api/history');
+  if (!ok || !data.builds || !data.builds.length) return;
+  $('#hist-body').innerHTML = data.builds.map(b => {
+    const cls = b.status === 'success' ? 'pass' : (b.status === 'failed' ? 'fail' : '');
+    const badge = b.status === 'success'
+      ? '<span class="tag ok">成功</span>'
+      : b.status === 'failed' ? '<span class="tag bad">失败</span>'
+      : '<span class="tag run">进行中</span>';
+    const gate = b.gate_passed === true ? '<span class="tag ok">门禁通过</span>'
+               : b.gate_passed === false ? '<span class="tag bad">门禁未过</span>' : '';
+    const dur = b.duration_s ? `${Math.floor(b.duration_s / 60)}分${b.duration_s % 60}秒` : '';
+    const changes = (b.changes || []).join(' · ') || '无组件变化';
+    const vers = (b.verifications || [])
+      .map(v => `<span class="tag ${v.passed ? 'ok' : 'bad'}">${v.target_os}</span>`).join(' ');
+    return `<div class="hist ${cls}">
+      <div class="row">
+        <strong>#${b.id} ${b.package_version}</strong>
+        <span class="tag">${b.arch}</span>${badge}${gate}
+        <span class="note">${b.started_at} ${dur} ${b.operator || ''}</span>
+      </div>
+      <div class="note" style="margin-top:4px">${changes}</div>
+      ${vers ? `<div style="margin-top:6px">${vers}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+refreshStatus();
+setInterval(() => { if (state.authed && !es) loadHistory(); }, 30000);
+</script>
+</body>
+</html>

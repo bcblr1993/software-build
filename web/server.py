@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""构建控制台 HTTP 服务。
+
+刻意只用标准库实现：这套系统面向的是离线、带宽受限的内网环境，
+让构建机反过来依赖 pip 能否装上 FastAPI 是不合适的。所需能力
+（REST、SSE、静态文件、会话）标准库都能覆盖。
+
+    python3 web/server.py --port 8899
+
+首次访问引导绑定验证器；此后凭动态验证码登录即可触发构建。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import os
+import queue
+import sys
+import threading
+import time
+import urllib.parse
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+WEB_DIR = Path(__file__).resolve().parent
+REPO_ROOT = WEB_DIR.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(WEB_DIR))
+
+from auth import Authenticator  # noqa: E402
+from sprixin_build.config import Config, ConfigError  # noqa: E402
+from sprixin_build.record import BuildStore  # noqa: E402
+
+SESSION_COOKIE = "sprixin_session"
+
+
+class BuildRunner:
+    """串行执行构建任务，并向订阅者广播日志。
+
+    构建是重资源操作（编译、QEMU 模拟、容器），同一时刻只允许一个，
+    避免两次构建争抢 sysroot 卷导致产物被污染。
+    """
+
+    def __init__(self, repo_root: Path, workspace: Path, store: BuildStore) -> None:
+        self.repo_root = repo_root
+        self.workspace = workspace
+        self.store = store
+        self._lock = threading.Lock()
+        self._current: dict | None = None
+        self._subscribers: list[queue.Queue] = []
+        self._sub_lock = threading.Lock()
+        self._history: list[str] = []
+
+    @property
+    def busy(self) -> bool:
+        return self._current is not None
+
+    @property
+    def current(self) -> dict | None:
+        return dict(self._current) if self._current else None
+
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue()
+        with self._sub_lock:
+            for line in self._history[-200:]:
+                q.put(line)
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._sub_lock:
+            if q in self._subscribers:
+                self._subscribers.remove(q)
+
+    def _emit(self, line: str) -> None:
+        self._history.append(line)
+        if len(self._history) > 5000:
+            self._history = self._history[-2000:]
+        with self._sub_lock:
+            for q in list(self._subscribers):
+                try:
+                    q.put_nowait(line)
+                except queue.Full:
+                    pass
+
+    def start(self, *, arch: str, components: list[str], operator: str) -> tuple[bool, str]:
+        with self._lock:
+            if self.busy:
+                return False, "已有构建在进行中"
+            self._history = []
+            self._current = {
+                "arch": arch,
+                "components": components,
+                "operator": operator,
+                "started_at": time.time(),
+            }
+        threading.Thread(
+            target=self._run, args=(arch, components, operator), daemon=True
+        ).start()
+        return True, "构建已启动"
+
+    def _run(self, arch: str, components: list[str], operator: str) -> None:
+        import subprocess
+
+        cmd = [
+            sys.executable,
+            str(self.repo_root / "scripts" / "build.py"),
+            "--workspace", str(self.workspace),
+            "build",
+            "--arch", arch,
+        ]
+        for c in components:
+            cmd += ["--component", c]
+
+        self._emit(f"$ {' '.join(cmd)}")
+        rc = 1
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=str(self.repo_root),
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                self._emit(line.rstrip("\n"))
+            proc.wait()
+            rc = proc.returncode
+        except Exception as exc:  # noqa: BLE001
+            self._emit(f"构建进程异常: {exc}")
+        finally:
+            self._emit(f"__DONE__ {rc}")
+            self._current = None
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "sprixin-build"
+    protocol_version = "HTTP/1.1"
+
+    # ── 基础设施 ────────────────────────────────────────────────────
+
+    def log_message(self, fmt: str, *args) -> None:  # 降噪
+        if self.path.startswith("/api/build/log"):
+            return
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _send_json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _body(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return {}
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+
+    def _cookies(self) -> dict[str, str]:
+        raw = self.headers.get("Cookie", "")
+        out = {}
+        for part in raw.split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                out[k] = v
+        return out
+
+    def _subject(self) -> str | None:
+        return self.server.auth.validate_session(self._cookies().get(SESSION_COOKIE))
+
+    def _require_auth(self) -> str | None:
+        subject = self._subject()
+        if subject is None:
+            self._send_json({"error": "未登录或会话已过期"}, 401)
+            return None
+        return subject
+
+    # ── 路由 ────────────────────────────────────────────────────────
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        route = parsed.path
+
+        if route in ("/", "/index.html"):
+            return self._serve_static("index.html")
+        if route.startswith("/static/"):
+            return self._serve_static(route[len("/static/"):])
+
+        if route == "/api/status":
+            return self._send_json({
+                "bound": self.server.auth.is_bound,
+                "authenticated": self._subject() is not None,
+                "busy": self.server.runner.busy,
+                "current": self.server.runner.current,
+            })
+
+        if route == "/api/components":
+            if self._require_auth() is None:
+                return
+            return self._api_components()
+
+        if route == "/api/history":
+            if self._require_auth() is None:
+                return
+            return self._api_history()
+
+        if route == "/api/build/log":
+            if self._require_auth() is None:
+                return
+            return self._api_build_log()
+
+        self._send_json({"error": "未找到"}, 404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        route = urllib.parse.urlparse(self.path).path
+        body = self._body()
+
+        if route == "/api/enroll/begin":
+            return self._api_enroll_begin()
+        if route == "/api/enroll/confirm":
+            return self._api_enroll_confirm(body)
+        if route == "/api/login":
+            return self._api_login(body)
+        if route == "/api/logout":
+            return self._api_logout()
+
+        if route == "/api/components":
+            if self._require_auth() is None:
+                return
+            return self._api_update_components(body)
+
+        if route == "/api/build":
+            subject = self._require_auth()
+            if subject is None:
+                return
+            return self._api_build(body, subject)
+
+        self._send_json({"error": "未找到"}, 404)
+
+    # ── 认证 ────────────────────────────────────────────────────────
+
+    def _api_enroll_begin(self) -> None:
+        auth = self.server.auth
+        try:
+            secret, uri = auth.begin_enrollment()
+        except PermissionError as exc:
+            return self._send_json({"error": str(exc)}, 409)
+        # 分组显示便于手工输入
+        grouped = " ".join(secret[i:i + 4] for i in range(0, len(secret), 4))
+        self._send_json({"secret": secret, "secret_grouped": grouped, "uri": uri})
+
+    def _api_enroll_confirm(self, body: dict) -> None:
+        auth = self.server.auth
+        try:
+            ok = auth.confirm_enrollment(str(body.get("code", "")))
+        except (PermissionError, ValueError) as exc:
+            return self._send_json({"error": str(exc)}, 409)
+        if not ok:
+            return self._send_json({"error": "验证码不正确，请确认设备时间准确"}, 400)
+        # 绑定成功即视为已登录，直接签发会话
+        self._send_with_session({"ok": True}, auth.issue_session())
+
+    def _api_login(self, body: dict) -> None:
+        auth = self.server.auth
+        ok, msg = auth.verify(str(body.get("code", "")))
+        if not ok:
+            return self._send_json({"error": msg}, 401)
+        self._send_with_session({"ok": True, "message": msg}, auth.issue_session())
+
+    def _send_with_session(self, payload: dict, token: str) -> None:
+        """发送 JSON 响应并附带会话 Cookie。
+
+        Set-Cookie 必须与响应头一同发出，因此不能先调用 _send_json
+        再补设 —— 那时响应头已经写出，Cookie 不会生效。
+        """
+        body_out = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body_out)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Set-Cookie",
+            f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800",
+        )
+        self.end_headers()
+        self.wfile.write(body_out)
+
+    def _api_logout(self) -> None:
+        body_out = json.dumps({"ok": True}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body_out)))
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; Max-Age=0")
+        self.end_headers()
+        self.wfile.write(body_out)
+
+    # ── 组件 ────────────────────────────────────────────────────────
+
+    def _api_components(self) -> None:
+        try:
+            cfg = Config.load(self.server.config_path)
+        except ConfigError as exc:
+            return self._send_json({"error": str(exc)}, 500)
+
+        comps = []
+        for c in cfg.components.values():
+            comps.append({
+                "name": c.name,
+                "build": c.build,
+                "version": c.version,
+                "version_per_arch": c.version_per_arch,
+                "vendor": c.vendor,
+                "locked": c.locked,
+            })
+        self._send_json({
+            "package": {
+                "name": cfg.package_name,
+                "version": cfg.package_version,
+                "top_dir": cfg.top_dir,
+            },
+            "baseline": {"glibc_max": cfg.glibc_max},
+            "architectures": cfg.architectures,
+            "vendored_libs": {
+                n: {"version": l.version, "locked": l.locked}
+                for n, l in cfg.vendored_libs.items()
+            },
+            "components": comps,
+        })
+
+    def _api_update_components(self, body: dict) -> None:
+        """更新组件版本。
+
+        只改动 version 与 sha256 两个字段，采用逐行文本替换而非重写
+        整个 YAML —— 清单里的注释记录了大量决策依据（为何禁用 LVS、
+        为何固定 OpenSSL 1.1 等），用 yaml.dump 回写会把它们全部丢掉。
+        """
+        updates = body.get("updates") or {}
+        if not isinstance(updates, dict) or not updates:
+            return self._send_json({"error": "没有需要更新的内容"}, 400)
+
+        path = Path(self.server.config_path)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except OSError as exc:
+            return self._send_json({"error": f"无法读取清单: {exc}"}, 500)
+
+        changed: list[str] = []
+        current: str | None = None
+        in_components = False
+
+        for i, line in enumerate(lines):
+            stripped = line.rstrip("\n")
+            if stripped.startswith("components:"):
+                in_components = True
+                continue
+            if in_components and stripped and not stripped[0].isspace():
+                in_components = False
+            if not in_components:
+                continue
+
+            if len(line) - len(line.lstrip()) == 2 and stripped.endswith(":"):
+                current = stripped.strip().rstrip(":")
+                continue
+
+            if current in updates:
+                spec = updates[current]
+                for key in ("version", "sha256"):
+                    if key not in spec:
+                        continue
+                    marker = f"{key}:"
+                    if stripped.strip().startswith(marker):
+                        indent = line[: len(line) - len(line.lstrip())]
+                        value = str(spec[key])
+                        quoted = f'"{value}"' if key == "version" else value
+                        lines[i] = f"{indent}{key}: {quoted}\n"
+                        changed.append(f"{current}.{key} = {value}")
+
+        if not changed:
+            return self._send_json({"error": "清单中没有匹配到可更新的字段"}, 400)
+
+        backup = path.with_suffix(".yaml.bak")
+        try:
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            path.write_text("".join(lines), encoding="utf-8")
+            Config.load(path)  # 立即回读校验，避免写坏清单
+        except (OSError, ConfigError) as exc:
+            if backup.exists():
+                path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+            return self._send_json({"error": f"更新失败，已回滚: {exc}"}, 500)
+
+        self._send_json({"ok": True, "changed": changed})
+
+    # ── 构建 ────────────────────────────────────────────────────────
+
+    def _api_build(self, body: dict, subject: str) -> None:
+        arch = str(body.get("arch") or "x86_64")
+        components = body.get("components") or []
+        if not isinstance(components, list):
+            components = []
+        ok, msg = self.server.runner.start(
+            arch=arch, components=[str(c) for c in components], operator=subject
+        )
+        self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
+
+    def _api_build_log(self) -> None:
+        """以 SSE 推送构建日志。"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        q = self.server.runner.subscribe()
+        try:
+            while True:
+                try:
+                    line = q.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                payload = json.dumps({"line": line}, ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                if line.startswith("__DONE__"):
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self.server.runner.unsubscribe(q)
+
+    # ── 沿革 ────────────────────────────────────────────────────────
+
+    def _api_history(self) -> None:
+        store = self.server.store
+        records = store.history(limit=50)
+        out = []
+        for rec in records:
+            prev = store.previous_success(rec.id, rec.arch)
+            out.append({
+                "id": rec.id,
+                "package_version": rec.package_version,
+                "arch": rec.arch,
+                "status": rec.status,
+                "started_at": rec.started_at,
+                "duration_s": rec.duration_s,
+                "operator": rec.operator,
+                "gate_passed": rec.gate_passed,
+                "changes": rec.diff_against(prev),
+                "artifacts": [
+                    {"filename": a["filename"], "sha256": a["sha256"], "size": a["size"]}
+                    for a in rec.artifacts
+                ],
+                "verifications": [
+                    {"target_os": v["target_os"], "passed": bool(v["passed"])}
+                    for v in rec.verifications
+                ],
+            })
+        self._send_json({"builds": out})
+
+    # ── 静态文件 ────────────────────────────────────────────────────
+
+    def _serve_static(self, rel: str) -> None:
+        # 防目录穿越
+        target = (WEB_DIR / "static" / rel).resolve()
+        static_root = (WEB_DIR / "static").resolve()
+        if not str(target).startswith(str(static_root)) or not target.is_file():
+            return self._send_json({"error": "未找到"}, 404)
+
+        data = target.read_bytes()
+        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype == "application/javascript":
+            ctype += "; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="sprixin-build 构建控制台")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8899)
+    parser.add_argument("--workspace", default=os.environ.get("SPRIXIN_WORKSPACE", "/root/sprixin-build"))
+    parser.add_argument("--config", default=str(REPO_ROOT / "components.yaml"))
+    args = parser.parse_args()
+
+    workspace = Path(args.workspace)
+    secrets_dir = workspace / "secrets"
+    secrets_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    httpd.auth = Authenticator(secrets_dir / "auth.json")
+    httpd.store = BuildStore(workspace / "builds.db")
+    httpd.runner = BuildRunner(REPO_ROOT, workspace, httpd.store)
+    httpd.config_path = args.config
+
+    state = "已绑定验证器" if httpd.auth.is_bound else "尚未绑定，首次访问将引导绑定"
+    print(f"构建控制台已启动: http://{args.host}:{args.port}  （{state}）", flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
