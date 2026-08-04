@@ -59,6 +59,9 @@ WANTED=(
   libselinux libsepol pcre pcre2 libcap
   libcrypt libxcrypt
   gawk sed grep findutils
+  # gawk 的运行时依赖，缺任何一个 awk 都无法启动，
+  # 而 verify.sh 用 awk 从 redis.conf 中取 requirepass
+  libsigsegv readline mpfr
   zlib openssl-libs
   filesystem setup basesystem
   libgcc gmp libffi p11-kit-trust ca-certificates
@@ -66,6 +69,12 @@ WANTED=(
   # 各发行版对 attr/acl 的拆包方式不同：CentOS 7 提供 libattr / libacl，
   # openEuler 系（凝思、麒麟信安）把 .so 放在 attr / acl 包中。两种都取。
   attr acl libattr libacl
+  # glibc 2.17 系（CentOS 7、KylinSec 3.3）的 libcrypt.so.1 依赖 NSS 的
+  # libfreebl3.so。真实系统上它属于基础包，最小 rootfs 里必须显式补上，
+  # 否则任何用到 crypt() 的程序（如 nginx）都会被误判为无法运行。
+  nss-softokn-freebl nss-softokn nspr nss-util
+  # 麒麟 V10 的 bash 等基础命令链接了其安全模块 libkysec.so.0
+  kysec-base libkysec kysec-utils
 )
 
 echo "收集软件包"
@@ -108,6 +117,62 @@ docker run --rm \
     mkdir -p /work/rootfs/{proc,sys,dev,tmp,etc,var/tmp,run}
     chmod 1777 /work/rootfs/tmp /work/rootfs/var/tmp
   '
+
+# ── 自动闭包依赖 ────────────────────────────────────────────────────
+#
+# 各发行版的拆包方式差别很大：CentOS 7 的 libattr 在 openEuler 系叫 attr，
+# 麒麟把安全模块拆成 libkysec / libsecurity1 并让 bash 直接链接它们。
+# 手工维护包名清单既繁琐又必然遗漏，因此改为静态分析补齐：
+# 读 rootfs 中关键二进制的 DT_NEEDED，凡在 rootfs 内找不到的库，
+# 就从 ISO 里反查提供它的包补进来，直到不再有缺失。
+#
+# 用 readelf 而非运行容器：宿主的 readelf 可读取任意架构的 ELF，
+# 而此时 aarch64 的镜像还没造出来。
+
+find_lib() {  # 在 rootfs 中查找某个 .so
+  find "$WORK/rootfs" -name "$1" -print -quit 2>/dev/null
+}
+
+resolve_deps() {
+  local round missing so base cand rpm added
+  for round in 1 2 3 4; do
+    missing=""
+    # 逐个检查 rootfs 中的可执行文件与库
+    while IFS= read -r bin; do
+      [ -f "$bin" ] || continue
+      head -c 4 "$bin" 2>/dev/null | grep -q ELF || continue
+      while IFS= read -r so; do
+        [ -n "$so" ] || continue
+        [ -n "$(find_lib "$so")" ] && continue
+        case " $missing " in *" $so "*) ;; *) missing="$missing $so" ;; esac
+      done < <(readelf -d "$bin" 2>/dev/null | awk '/NEEDED/ {gsub(/[\[\]]/,"",$5); print $5}')
+    done < <(find "$WORK/rootfs" \( -path '*/bin/*' -o -path '*/sbin/*' -o -name '*.so*' \) -type f 2>/dev/null)
+
+    [ -z "${missing// /}" ] && { echo "  依赖已闭合"; return 0; }
+    echo "  第 $round 轮缺失:$missing"
+
+    # 由 repodata 的 provides 精确定位提供者：包名无从猜测
+    # （libnss3.so 在 nss、libglib-2.0.so.0 在 glib2、liblzma.so.5 在 xz-libs）
+    added=0
+    while read -r so rel; do
+      [ -n "${rel:-}" ] || continue
+      rpm="$MNT/$rel"
+      [ -f "$rpm" ] || continue
+      [ -e "$WORK/rpms/$(basename "$rpm")" ] && continue
+      cp "$rpm" "$WORK/rpms/"
+      docker run --rm -v "$WORK:/work" "$TOOL_IMAGE" bash -c \
+        "cd /work/rootfs && rpm2cpio /work/rpms/$(basename "$rpm") | cpio -idmu --quiet 2>/dev/null || true"
+      echo "    $so ← $(basename "$rpm")"
+      added=$((added + 1))
+    done < <(python3 "$(dirname "$0")/rpm-index.py" "$MNT" $missing 2>/dev/null)
+
+    [ "$added" -eq 0 ] && { echo "  仍有缺失且 repodata 中无提供者:$missing"; return 1; }
+  done
+  return 1
+}
+
+echo "闭包依赖"
+resolve_deps || true
 
 # 记录来源，便于日后追溯这个验证镜像是从哪个 ISO 造出来的
 cat > "$WORK/rootfs/etc/sprixin-compat-source" <<EOF

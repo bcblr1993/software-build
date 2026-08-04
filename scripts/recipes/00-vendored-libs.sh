@@ -49,12 +49,21 @@ make install
 log "编译 OpenSSL $OPENSSL_VERSION"
 extract "$CACHE/openssl-$OPENSSL_VERSION.tar.gz" "$BUILD/openssl"
 cd "$BUILD/openssl"
+#
+# rpath 中的 $ORIGIN 同样要穿过 bash、make、shell 三层。
+# 只写 '$ORIGIN' 是不够的：OpenSSL 会把它写进 Makefile，make 把 $O 当作
+# 变量展开成空，最终 rpath 变成字面量 "RIGIN"（ABI 门禁即由此发现）。
+# 正确写法是 '$$ORIGIN'，交给 make 还原成 $ORIGIN，再由单引号保护到链接器。
+#
+# 自带库彼此同处一个 lib/ 目录（libssl 依赖 libcrypto），给它们各自加上
+# 指向自身目录的 rpath，就不必依赖主程序 DT_RPATH 向依赖树传递 ——
+# 新版链接器默认生成的是 DT_RUNPATH，而 RUNPATH 不会向下传递。
 ./config \
   --prefix="$SYSROOT" \
   --openssldir="$SYSROOT/ssl" \
   shared \
   no-tests \
-  -Wl,-rpath,'$ORIGIN'
+  "-Wl,-rpath,'\$\$ORIGIN'"
 make -j"$JOBS"
 # install_sw 只装库与头文件，跳过文档，省去大量时间
 make install_sw
