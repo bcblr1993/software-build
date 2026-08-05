@@ -90,10 +90,12 @@ if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":5672\b"; then
     export PATH="$ERTS_DIR/bin:$PATH"
     timeout 300 ./rabbitmq/sbin/rabbitmq-plugins enable rabbitmq_management >/dev/null 2>&1
     ./rabbitmq/sbin/rabbitmq-server -detached >/dev/null 2>&1
-    for i in $(seq 1 30); do
-      sleep 10
+    # 轮询间隔取 3 秒而非 10 秒：等待上限不变，但服务就绪后能立即继续，
+    # 不必空等一整个周期。乘以多个系统与多个服务，省下的时间相当可观。
+    for i in $(seq 1 100); do
+      sleep 3
       if (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":5672\b"; then
-        echo "  已就绪，额外用时 $((i * 10)) 秒"
+        echo "  已就绪，额外用时 $((i * 3)) 秒"
         break
       fi
     done
@@ -106,10 +108,10 @@ if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"; then
   if pgrep -f "nacos" >/dev/null 2>&1; then
     echo
     echo "nacos 进程在运行但端口未就绪，继续等待（模拟环境下 JVM 较慢）"
-    for i in $(seq 1 30); do
-      sleep 10
+    for i in $(seq 1 100); do
+      sleep 3
       if (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"; then
-        echo "  已就绪，额外用时 $((i * 10)) 秒"
+        echo "  已就绪，额外用时 $((i * 3)) 秒"
         break
       fi
     done

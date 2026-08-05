@@ -609,8 +609,17 @@ def cmd_all(args, cfg: Config, ws: Workspace) -> int:
         return _summary(results, archs, started, failed=False)
 
     import subprocess
+    import tempfile
 
-    verify_failed = False
+    # 各架构的验证互不相干（容器、工作目录、包副本都是独立的），故并行执行。
+    # aarch64 经 QEMU 模拟，实测比原生慢约 7 倍，串行等它跑完再跑 x86_64
+    # 纯属浪费 —— 两者同时进行，总耗时取决于慢的那个而非二者之和。
+    log("")
+    log("█" * 68)
+    log(f"█  目标系统验证（{len(archs)} 个架构并行）")
+    log("█" * 68)
+
+    jobs = []
     for arch in archs:
         pkgs = sorted(
             (ws.dist / arch).glob("*.tar.gz"),
@@ -619,17 +628,29 @@ def cmd_all(args, cfg: Config, ws: Workspace) -> int:
         )
         if not pkgs:
             continue
-
-        log("")
-        log("█" * 68)
-        log(f"█  目标系统验证：{arch}")
-        log("█" * 68)
-
-        proc = subprocess.run(
-            ["bash", str(REPO_ROOT / "compat" / "e2e-test.sh"), str(pkgs[0])],
-            cwd=str(REPO_ROOT),
+        out = tempfile.NamedTemporaryFile(
+            mode="w+", suffix=f"-{arch}.log", delete=False, encoding="utf-8"
         )
-        if proc.returncode != 0:
+        proc = subprocess.Popen(
+            ["bash", str(REPO_ROOT / "compat" / "e2e-test.sh"), str(pkgs[0])],
+            cwd=str(REPO_ROOT), stdout=out, stderr=subprocess.STDOUT,
+        )
+        jobs.append((arch, proc, out))
+        log(f"  {arch} 验证已启动")
+
+    verify_failed = False
+    for arch, proc, out in jobs:
+        rc = proc.wait()
+        out.close()
+        log("")
+        log(f"── {arch} 验证输出 " + "─" * 44)
+        try:
+            log(Path(out.name).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+        Path(out.name).unlink(missing_ok=True)
+
+        if rc != 0:
             results[arch] += "，但目标系统验证未全部通过"
             verify_failed = True
         else:
