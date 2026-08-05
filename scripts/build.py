@@ -192,6 +192,24 @@ def cmd_fetch(args, cfg: Config, ws: Workspace) -> int:
     return 0
 
 
+def uploaded_components(ws: Workspace, cfg: Config, arch: str) -> set[str]:
+    """列出已有上传件、因而无需从上游获取的组件。
+
+    识别口径与打包阶段一致（同为 repack 类型 + uploads/<arch>/<名>.tar.gz），
+    两处若不一致，就会出现"下了却没用"或"没下却要用"。
+    """
+    found: set[str] = set()
+    upload_dir = ws.root / "uploads" / arch
+    if not upload_dir.is_dir():
+        return found
+    for f in upload_dir.glob("*.tar.gz"):
+        name = f.stem.replace(".tar", "")
+        comp = cfg.components.get(name)
+        if comp is not None and comp.build == "repack":
+            found.add(name)
+    return found
+
+
 def _attest_path(ws: Workspace, arch: str) -> Path:
     return Path(ws.cache).parent / f"attestations-{arch}.json"
 
@@ -252,7 +270,7 @@ def cmd_build(args, cfg: Config, ws: Workspace) -> int:
     section(f"获取上游源码（{arch}）")
     fetcher = Fetcher(ws.cache, log=log, repo_root=REPO_ROOT)
     try:
-        results = fetcher.fetch_all(cfg, arch)
+        results = fetcher.fetch_all(cfg, arch, skip=uploaded_components(ws, cfg, arch))
     except FetchError as exc:
         log(f"\n{exc}")
         return 1

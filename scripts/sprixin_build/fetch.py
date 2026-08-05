@@ -194,10 +194,18 @@ class Fetcher:
 
     # ── 批量 ────────────────────────────────────────────────────────
 
-    def fetch_all(self, cfg: Config, arch: str) -> list[FetchResult]:
-        """获取指定架构所需的全部上游归档。"""
+    def fetch_all(
+        self, cfg: Config, arch: str, skip: set[str] | None = None
+    ) -> list[FetchResult]:
+        """获取指定架构所需的全部上游归档。
+
+        skip 用于排除已有上传件的组件：nacos 与 influxdb 允许自行改好后
+        上传，打包时用的就是上传的那一份，再把上游原版拉一遍纯属白费 ——
+        nacos 单个就有 200MB，在内网 1M 出口上要半小时。
+        """
         results: list[FetchResult] = []
         ups = getattr(cfg, "upstreams", {}) or {}
+        skip = skip or set()
 
         self.log(f"随包依赖库（{len(cfg.vendored_libs)} 项）")
         for lib in cfg.vendored_libs.values():
@@ -206,6 +214,9 @@ class Fetcher:
         comps = [c for c in cfg.components.values() if not c.local_only]
         self.log(f"组件（{len(comps)} 项，架构 {arch}）")
         for comp in comps:
+            if comp.name in skip:
+                self.log(f"  [跳过] {comp.name}：将采用已上传的归档")
+                continue
             results.append(self._fetch_component(comp, arch, ups))
 
         self._report(results)
