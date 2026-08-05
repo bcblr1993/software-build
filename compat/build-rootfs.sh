@@ -307,10 +307,38 @@ resolve_deps() {
 echo "闭包依赖"
 resolve_deps || true
 
-# 记录来源，便于日后追溯这个验证镜像是从哪个 ISO 造出来的
+# 记录来源，便于日后追溯这个验证镜像是从哪个 ISO 造出来的。
+#
+# 一并记下发行版的自述名称：最小 rootfs 往往不含 /etc/os-release
+# （麒麟信安的盘即如此），而发布说明要求写清是哪个系统、什么版本，
+# 只有 ISO 文件名是不够的。安装盘的 .treeinfo / kyinfo 里有这些信息。
+distro_name=""
+for meta in "$MNT/.treeinfo" "$MNT/treeinfo" "$MNT/kyinfo" "$MNT/.kyinfo"; do
+  [ -r "$meta" ] || continue
+  fam="$(sed -n 's/^ *family *= *//p' "$meta" | head -1)"
+  ver="$(sed -n 's/^ *version *= *//p' "$meta" | head -1)"
+  nam="$(sed -n 's/^ *name *= *//p' "$meta" | head -1)"
+  mil="$(sed -n 's/^ *milestone *= *//p' "$meta" | head -1)"
+  if [ -n "$fam" ]; then
+    distro_name="$fam${ver:+ $ver}"
+  elif [ -n "$nam" ]; then
+    distro_name="$nam${mil:+ $mil}"
+  fi
+  [ -n "$distro_name" ] && break
+done
+
+# 盘里若装有发行版标识文件，以它为准 —— 那是系统自己的说法
+for rel in "$WORK/rootfs/etc/os-release"; do
+  [ -r "$rel" ] || continue
+  pretty="$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$rel" | head -1)"
+  [ -n "$pretty" ] && distro_name="$pretty"
+done
+
 cat > "$WORK/rootfs/etc/sprixin-compat-source" <<EOF
 iso=$BASE_NAME
 arch=$ARCH
+pkgfmt=$PKGFMT
+distro=${distro_name:-$BASE_NAME}
 built_at=$(date -Iseconds)
 packages=${#pkgs[@]}
 EOF

@@ -493,12 +493,37 @@ def render_release_notes(
     if verifications:
         a("## 已验证的目标系统")
         a("")
-        a("下列系统的验证容器均由其安装 ISO 直接构建，在其中以普通用户完整")
-        a("解压、安装并逐个启动全部服务，再确认端口监听与健康检查。")
-        a("")
+
+        # 物理机验证单列在前：它不受模拟环境的干扰，是更强的证据
+        physical = [v for v in verifications if v.get("kind") == "物理机"]
+        if physical:
+            a("### 物理机实测")
+            a("")
+            for v in physical:
+                a(f"**{v.get('os_name', '?')}**（{v.get('arch', '?')}，glibc {v.get('glibc', '?')}）")
+                a("")
+                a(f"- 主机：{v.get('target', '?')}")
+                if v.get("kernel"):
+                    a(f"- 内核：`{v['kernel']}`")
+                if v.get("run_as"):
+                    a(f"- 运行身份：{v['run_as']}")
+                svc = v.get("services") or {}
+                ok = [k for k, x in svc.items() if x]
+                a(f"- 启动的服务：{'、'.join(ok)}（{len(ok)}/{len(svc)}）")
+                if v.get("note"):
+                    a(f"- 结论：{v['note']}")
+                a("")
+
+        containers = [v for v in verifications if v.get("kind") != "物理机"]
+        if containers:
+            a("### 目标系统容器")
+            a("")
+            a("下列系统的验证容器均由其安装 ISO 直接构建，在其中以普通用户完整")
+            a("解压、安装并逐个启动全部服务，再确认端口监听与健康检查。")
+            a("")
 
         by_arch: dict[str, list[dict]] = {}
-        for v in verifications:
+        for v in containers:
             by_arch.setdefault(v.get("arch", "?"), []).append(v)
 
         for arch in sorted(by_arch):

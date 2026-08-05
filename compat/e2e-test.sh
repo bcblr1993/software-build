@@ -194,14 +194,32 @@ RUNNER_EOF
 # 且要精确到版本号 —— 仅有 ISO 文件名不够，需取系统自报的名称与 glibc。
 describe_target() {
   local image="$1"
-  docker run --rm "$image" bash -c '
+  local tag="${image#sprixin-compat:}"
+  local desc
+  desc="$(docker run --rm "$image" bash -c '
     name=""
     [ -r /etc/os-release ] && name="$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
     [ -z "$name" ] && [ -r /etc/redhat-release ] && name="$(cat /etc/redhat-release)"
+    [ -z "$name" ] && [ -r /etc/kylin-release ] && name="$(cat /etc/kylin-release)"
+    [ -z "$name" ] && [ -r /etc/kylinsec-release ] && name="$(cat /etc/kylinsec-release)"
+    [ -z "$name" ] && [ -r /etc/system-release ] && name="$(cat /etc/system-release)"
     [ -z "$name" ] && [ -r /etc/issue ] && name="$(head -1 /etc/issue | sed "s/\\\\[a-z]//g")"
+    # 最小 rootfs 未必带发行版标识文件（麒麟信安的盘即如此），
+    # 退回构建镜像时从安装盘元数据提取并记下的发行版名称
+    [ -z "$name" ] && [ -r /etc/sprixin-compat-source ] \
+      && name="$(sed -n "s/^distro=//p" /etc/sprixin-compat-source)"
+    [ -z "$name" ] && [ -r /etc/sprixin-compat-source ] \
+      && name="$(sed -n "s/^iso=//p" /etc/sprixin-compat-source)"
     glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE "[0-9]+\.[0-9]+$")"
-    printf "%s\t%s\n" "${name:-未知}" "${glibc:-?}"
-  ' 2>/dev/null | tail -1
+    printf "%s\t%s\n" "${name:-}" "${glibc:-?}"
+  ' 2>/dev/null | tail -1)"
+
+  local name="${desc%%$'\t'*}"
+  local glibc="${desc##*$'\t'}"
+  # 仍为空则用镜像标签兜底 —— 发布说明须写清是哪个系统，
+  # "未知"对读者没有任何意义
+  name="$(printf '%s' "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  printf "%s\t%s\n" "${name:-$tag}" "${glibc:-?}"
 }
 
 run_in() {
