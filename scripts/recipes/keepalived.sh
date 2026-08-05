@@ -36,9 +36,13 @@ log() { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 
 log "编译 keepalived $KEEPALIVED_VERSION"
 
+. /recipes/common.sh
+archive="$(require_source keepalived "$KEEPALIVED_VERSION" \
+  "keepalived-$KEEPALIVED_VERSION.tar.gz")"
+
 src="$BUILD/keepalived"
 rm -rf "$src" && mkdir -p "$src"
-tar -xf "$CACHE/keepalived-$KEEPALIVED_VERSION.tar.gz" -C "$src" --strip-components 1
+tar -xf "$archive" -C "$src" --strip-components 1
 cd "$src"
 
 # 基线镜像刻意不安装 libnl-devel：keepalived 检测不到时会使用内建的

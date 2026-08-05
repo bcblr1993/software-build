@@ -186,6 +186,29 @@ upstreams:
       index: https://raw.githubusercontent.com/redis/redis-hashes/master/README
       pattern: '^hash\s+redis-{version}\.tar\.gz\s+sha256\s+([0-9a-f]{64})'
 
+  rabbitmq:
+    tarball: https://github.com/rabbitmq/rabbitmq-server/releases/download/v{version}/rabbitmq-server-generic-unix-{version}.tar.xz
+    verify:
+      method: pgp
+      signature: "{tarball}.asc"
+      keyring: keys/rabbitmq.asc
+      fingerprints:
+        - 0A9AF2115F4687BD29803A206B73A36E6026DFCA  # RabbitMQ Release Signing Key
+
+  keepalived:
+    # keepalived 上游既不签名也不发布哈希清单 —— 这是上游自身的缺口，
+    # 无法凭空补上。退而求其次：与 Debian 归档中的同名上游 tarball 比对。
+    # 两者实测字节一致（sha256 6afd95dd…），且 Fedora 记录的 SHA512 亦吻合，
+    # 攻击者需同时改掉 keepalived.org 与 Debian 归档才能蒙混过关。
+    #
+    # 若 Debian 尚未收录目标版本，交叉比对无从进行，构建会被拒绝并提示 ——
+    # 这是刻意的：宁可挡住，也不在无凭据的情况下放行。
+    tarball: https://www.keepalived.org/software/keepalived-{version}.tar.gz
+    verify:
+      method: cross-source
+      mirrors:
+        - http://deb.debian.org/debian/pool/main/k/keepalived/keepalived_{version}.orig.tar.gz
+
 # 安装包内的静态文件，来自 overlay/，打包时原样复制。
 # install.sh / startup.sh / shutdown.sh 的行为必须与现有包保持一致。
 overlay_files:

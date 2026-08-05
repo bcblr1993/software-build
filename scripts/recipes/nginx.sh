@@ -30,9 +30,12 @@ log() { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 
 log "编译 nginx $NGINX_VERSION"
 
+. /recipes/common.sh
+archive="$(require_source nginx "$NGINX_VERSION" "nginx-$NGINX_VERSION.tar.gz")"
+
 src="$BUILD/nginx"
 rm -rf "$src" && mkdir -p "$src"
-tar -xf "$CACHE/nginx-$NGINX_VERSION.tar.gz" -C "$src" --strip-components 1
+tar -xf "$archive" -C "$src" --strip-components 1
 cd "$src"
 
 # configure 参数与现有包保持一致：现场的启停脚本与配置依赖该前缀。
