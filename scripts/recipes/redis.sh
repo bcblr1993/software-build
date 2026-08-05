@@ -27,10 +27,15 @@ log() { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 
 log "编译 redis $REDIS_VERSION"
 
+# 官方 tarball 名为 redis-X.Y.Z.tar.gz；GitHub 自动生成的 archive 名为
+# X.Y.Z.tar.gz。两者内容与哈希都不同，此处两种命名都认。
+. /recipes/common.sh
+archive="$(require_source redis "$REDIS_VERSION" \
+  "redis-$REDIS_VERSION.tar.gz" "$REDIS_VERSION.tar.gz")"
+
 src="$BUILD/redis"
 rm -rf "$src" && mkdir -p "$src"
-tar -xf "$CACHE/$REDIS_VERSION.tar.gz" -C "$src" --strip-components 1 2>/dev/null \
-  || tar -xf "$CACHE/redis-$REDIS_VERSION.tar.gz" -C "$src" --strip-components 1
+tar -xf "$archive" -C "$src" --strip-components 1
 cd "$src"
 
 # BUILD_TLS=yes 让 redis 链接 OpenSSL，指向自带的 sysroot 而非系统库。

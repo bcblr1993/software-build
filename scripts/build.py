@@ -204,6 +204,20 @@ def cmd_build(args, cfg: Config, ws: Workspace) -> int:
         log=log,
     )
 
+    # ── 获取上游源码 ────────────────────────────────────────────
+    #
+    # 必须在编译之前，且必须由 build 自己负责：先前 fetch 只是个独立
+    # 子命令，界面上改完版本号点构建，源码根本不会被下载 —— 配方跑起来
+    # 才发现 cache 里没有对应版本，报出的却是 tar 的 "Cannot open"，
+    # 完全看不出真实原因。改版本、点构建、出包这条主路径因此是断的。
+    section(f"获取上游源码（{arch}）")
+    fetcher = Fetcher(ws.cache, log=log, repo_root=REPO_ROOT)
+    try:
+        fetcher.fetch_all(cfg, arch)
+    except FetchError as exc:
+        log(f"\n{exc}")
+        return 1
+
     # ── 基线镜像 ────────────────────────────────────────────────
     section(f"基线镜像（{arch}）")
     try:
