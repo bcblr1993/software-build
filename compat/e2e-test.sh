@@ -103,14 +103,28 @@ if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":5672\b"; then
 fi
 
 # QEMU 模拟下 JVM 启动可比原生慢一个数量级，nacos 常在 startup.sh 的
-# 120 秒窗口内来不及监听端口。此处按实际情况再等，避免把"慢"误判成"坏"。
-if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"; then
-  if pgrep -f "nacos" >/dev/null 2>&1; then
+# 120 秒窗口内来不及就绪。此处按实际情况再等，避免把"慢"误判成"坏"。
+#
+# 等待条件是 readiness 接口而非端口监听：端口先于应用就绪，Spring 上下文
+# 还在初始化时端口就已经在听了。verify.sh 查的正是 readiness，只等端口
+# 会让它扑空 —— 实测 KylinSec 与麒麟 V10 上全部服务都起来了，唯独这一项
+# 报失败，就是这个原因。
+if pgrep -f "nacos" >/dev/null 2>&1; then
+  nacos_ready() {
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsS -m 5 http://127.0.0.1:8848/nacos/v1/console/health/readiness >/dev/null 2>&1
+    else
+      # 没有 curl 时退回端口判断，至少不阻塞
+      (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"
+    fi
+  }
+
+  if ! nacos_ready; then
     echo
-    echo "nacos 进程在运行但端口未就绪，继续等待（模拟环境下 JVM 较慢）"
-    for i in $(seq 1 100); do
+    echo "nacos 尚未就绪，继续等待（模拟环境下 JVM 较慢）"
+    for i in $(seq 1 120); do
       sleep 3
-      if (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"; then
+      if nacos_ready; then
         echo "  已就绪，额外用时 $((i * 3)) 秒"
         break
       fi

@@ -96,17 +96,27 @@ def guess_packages(so: str) -> list[str]:
     base = so.split(".so")[0]
     m = re.search(r"\.so\.(\d+)", so)
     ver = m.group(1) if m else ""
-    cands = []
-    if ver:
-        # 两种惯例都存在：libtinfo.so.5 → libtinfo5，
-        # 而 libssh2.so.1 → libssh2-1、libpcre2-8.so.0 → libpcre2-8-0
-        cands.append(f"{base}{ver}")
-        cands.append(f"{base}-{ver}")
-    cands.append(base)
+
+    # Debian 包名不用下划线，库名中的下划线一律写成连字符：
+    # libcom_err.so.2 → libcom-err2，libkysec_extend.so.0 → libkysec-extend0
+    bases = [base]
+    if "_" in base:
+        bases.append(base.replace("_", "-"))
+
+    cands: list[str] = []
+    for b in bases:
+        if ver:
+            # 两种惯例并存：libtinfo.so.5 → libtinfo5，
+            # 而 libssh2.so.1 → libssh2-1、libpcre2-8.so.0 → libpcre2-8-0
+            cands.append(f"{b}{ver}")
+            cands.append(f"{b}-{ver}")
+        cands.append(b)
+
     # 少数包名末尾带 .0，如 libbz2.so.1.0 → libbz2-1.0
     m2 = re.search(r"\.so\.([\d.]+)", so)
     if m2 and m2.group(1) != ver:
-        cands.append(f"{base}-{m2.group(1)}")
+        for b in bases:
+            cands.append(f"{b}-{m2.group(1)}")
     return cands
 
 

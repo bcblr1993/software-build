@@ -146,7 +146,9 @@ WANTED_DEB=(
   curl libcurl4 libcurl3
   # curl 在 Debian 上还牵出这些：闭包能自动补齐，但直接列出可少一轮
   libssh2-1 librtmp1 libidn11 libidn2-0 libnghttp2-14 libpsl5
-  libgssapi-krb5-2 libkrb5-3 libk5crypto3 libcomerr2 libldap-2.4-2
+  libgssapi-krb5-2 libkrb5-3 libk5crypto3 libldap-2.4-2
+  # Debian 包名不用下划线：libcom_err.so.2 在 libcom-err2 中
+  libcom-err2 libkeyutils1 libsasl2-2 libgnutls30 libp11-kit0 libtasn1-6
   hostname util-linux debianutils
   net-tools iproute2
   libreadline7 libreadline6 libsigsegv2 libmpfr6 libmpfr4
