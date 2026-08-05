@@ -106,6 +106,7 @@ class Fetcher:
         if pre is not None and target.exists() and target.stat().st_size > 0:
             if sha256_file(target) == pre.sha256:
                 self.log(f"  [缓存] {target.name}")
+                pre.tarball = url
                 return FetchResult(spec.name, target, pre.sha256, pre.sha256, False, pre)
             self.log(f"  [失效] {target.name} 与上游哈希不符，重新下载")
             target.unlink()
@@ -125,6 +126,7 @@ class Fetcher:
             target.unlink(missing_ok=True)
             raise
 
+        att.tarball = url
         self.log(f"  [校验] {att.summary()}")
         return FetchResult(spec.name, target, att.sha256, att.sha256, downloaded, att)
 

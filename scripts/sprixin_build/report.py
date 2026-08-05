@@ -28,6 +28,8 @@ class ComponentInfo:
     changed: str = ""       # 相对上一版本：新增 / 已变更 / 已移除 / 空表示未变
     source_url: str = ""
     source_sha256: str = ""
+    #: 本次获取时如何证明了归档来源（PGP 验签 / 上游哈希清单 / 多源交叉）
+    source_verification: str = ""
 
 
 def load_secrets(path: Path) -> dict[str, Any]:
@@ -83,6 +85,8 @@ def render_source_file(
             add(f"  上游地址: {c.source_url}")
         if c.source_sha256:
             add(f"  上游校验和: {c.source_sha256}")
+        if c.source_verification:
+            add(f"  来源校验: {c.source_verification}")
         add(f"  归档校验和: {c.sha256}")
         add(f"  归档大小: {c.size} 字节")
         add("")

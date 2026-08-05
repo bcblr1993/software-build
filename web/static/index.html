@@ -132,8 +132,8 @@
     <table>
       <thead>
         <tr><th style="width:20%">组件</th><th style="width:16%">构建方式</th>
-            <th style="width:24%">版本</th><th style="width:26%">随包库</th>
-            <th style="width:14%">校验和</th></tr>
+            <th style="width:22%">版本</th><th style="width:20%">随包库</th>
+            <th style="width:22%">来源校验</th></tr>
       </thead>
       <tbody id="comp-body"></tbody>
     </table>
@@ -295,6 +295,20 @@ async function loadComponents() {
       || '<option value="">（无可上传组件）</option>';
   }
 
+  // 已登记上游的组件，校验凭据来自上游签名或哈希清单，改版本号即可，
+  // 无需人工填 sha256；未登记的仍沿用清单里预先锁定的校验和。
+  const verifyCell = (c) => {
+    if (c.upstream) {
+      const cls = c.upstream.method === 'pgp' ? 'ok' : 'ok';
+      return `<span class="tag ${cls}">${c.upstream.label}</span>`
+           + `<div class="note" style="margin-top:4px">改版本号即自动取回</div>`;
+    }
+    if (c.build === 'repack') return '<span class="note">上传件</span>';
+    return c.locked
+      ? '<span class="tag ok">已锁定</span><div class="note" style="margin-top:4px">人工核对</div>'
+      : '<span class="tag warn">未锁定</span>';
+  };
+
   $('#comp-body').innerHTML = data.components.map(c => {
     const ver = c.version || Object.values(c.version_per_arch || {}).join(' / ') || '-';
     const editable = c.build !== 'repack' || true;
@@ -304,7 +318,7 @@ async function loadComponents() {
       <td><span class="tag">${kind}</span></td>
       <td><input class="ver" data-comp="${c.name}" value="${ver}" ${c.version ? '' : 'disabled'}></td>
       <td class="note">${(c.vendor || []).join(', ') || '—'}</td>
-      <td>${c.locked ? '<span class="tag ok">已锁定</span>' : '<span class="tag warn">未锁定</span>'}</td>
+      <td>${verifyCell(c)}</td>
     </tr>`;
   }).join('');
 }

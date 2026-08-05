@@ -67,7 +67,10 @@ class Attestation:
     method: str
     sha256: str
     detail: str
+    #: 签名／哈希清单／镜像的地址，即校验凭据本身的出处
     source_url: str = ""
+    #: 归档自身的下载地址
+    tarball: str = ""
     signers: list[str] = field(default_factory=list)
 
     @property

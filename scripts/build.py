@@ -192,6 +192,45 @@ def cmd_fetch(args, cfg: Config, ws: Workspace) -> int:
     return 0
 
 
+def _attest_path(ws: Workspace, arch: str) -> Path:
+    return Path(ws.cache).parent / f"attestations-{arch}.json"
+
+
+def save_attestations(ws: Workspace, arch: str, results) -> None:
+    """把本次获取的来源校验结果落盘，供打包阶段写入溯源信息。
+
+    编译与打包分处两次进程调用，内存里的校验结果传不过去；而产物的
+    SOURCE 文件正需要说明"这个 nginx 从哪来、凭什么认为它是官方的"。
+    """
+    out = {}
+    for r in results:
+        att = getattr(r, "attestation", None)
+        if att is None:
+            continue
+        out[r.name] = {
+            "sha256": att.sha256,
+            "method": att.method,
+            "summary": att.summary(),
+            "tarball": att.tarball or att.source_url,
+            "signers": list(getattr(att, "signers", []) or []),
+        }
+    if not out:
+        return
+    try:
+        _attest_path(ws, arch).write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        log(f"（提示）来源校验记录未能保存: {exc}")
+
+
+def load_attestations(ws: Workspace, arch: str) -> dict:
+    try:
+        return json.loads(_attest_path(ws, arch).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def cmd_build(args, cfg: Config, ws: Workspace) -> int:
     arch = args.arch
     started = time.time()
@@ -213,10 +252,11 @@ def cmd_build(args, cfg: Config, ws: Workspace) -> int:
     section(f"获取上游源码（{arch}）")
     fetcher = Fetcher(ws.cache, log=log, repo_root=REPO_ROOT)
     try:
-        fetcher.fetch_all(cfg, arch)
+        results = fetcher.fetch_all(cfg, arch)
     except FetchError as exc:
         log(f"\n{exc}")
         return 1
+    save_attestations(ws, arch, results)
 
     # ── 基线镜像 ────────────────────────────────────────────────
     section(f"基线镜像（{arch}）")
@@ -314,6 +354,9 @@ def do_package(args, cfg: Config, ws: Workspace, *, arch: str,
     """
     section(f"组装安装包（{arch}）")
 
+    # 本次获取时的来源校验结果，写进产物的溯源信息
+    attests = load_attestations(ws, arch)
+
     base_dir = ws.arch_base(arch)
     out_dir = ws.arch_out(arch)
 
@@ -400,11 +443,26 @@ def do_package(args, cfg: Config, ws: Workspace, *, arch: str,
                 name, version, path, original_name=archives.get(name, "")
             )
             inner.append(item)
+
+            # 溯源信息优先取本次获取时实际的校验结果 —— 它记录了归档从
+            # 哪里来、用何种手段证明了来源。清单里的静态 sha256 只是人工
+            # 抄写的一行，两者不一致时该信的是前者。
+            att = attests.get(name)
+            if att:
+                src_url = att.get("tarball", "")
+                src_sha = att.get("sha256", "")
+                src_note = att.get("summary", "")
+            else:
+                src_url = (comp.url_for(arch) or "") if comp else ""
+                src_sha = (comp.sha256 if comp and comp.locked else "")
+                src_note = ""
+
             infos.append(ComponentInfo(
                 name=name, version=version, build=kind,
                 sha256=item.sha256, size=item.size,
-                source_url=(comp.url_for(arch) or "") if comp else "",
-                source_sha256=(comp.sha256 if comp and comp.locked else ""),
+                source_url=src_url,
+                source_sha256=src_sha,
+                source_verification=src_note,
             ))
     except PackageError as exc:
         log(str(exc))

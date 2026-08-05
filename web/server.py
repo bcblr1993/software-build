@@ -416,8 +416,18 @@ class Handler(BaseHTTPRequestHandler):
         except ConfigError as exc:
             return self._send_json({"error": str(exc)}, 500)
 
+        # 已登记上游者，其校验凭据来自上游签名或哈希清单，界面上不必
+        # 再要求填 sha256 —— 那一栏正是 redis 8.8.0 那次填错版本的地方。
+        ups = getattr(cfg, "upstreams", {}) or {}
+        method_label = {
+            "pgp": "PGP 签名验证",
+            "hash-index": "上游哈希清单",
+            "cross-source": "多源交叉比对",
+        }
+
         comps = []
         for c in cfg.components.values():
+            spec = ups.get(c.name)
             comps.append({
                 "name": c.name,
                 "build": c.build,
@@ -425,6 +435,11 @@ class Handler(BaseHTTPRequestHandler):
                 "version_per_arch": c.version_per_arch,
                 "vendor": c.vendor,
                 "locked": c.locked,
+                "upstream": {
+                    "method": spec.method,
+                    "label": method_label.get(spec.method, spec.method),
+                    "tarball": spec.tarball,
+                } if spec else None,
             })
         self._send_json({
             "package": {
