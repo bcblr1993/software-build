@@ -38,6 +38,8 @@ class FetchResult:
     sha256: str
     expected: str
     downloaded: bool
+    #: 已登记上游时，此处记录用何种手段证明了归档来源
+    attestation: object | None = None
 
     @property
     def verified(self) -> bool:
@@ -45,7 +47,13 @@ class FetchResult:
 
     @property
     def unlocked(self) -> bool:
-        """校验和尚未在清单中锁定。"""
+        """校验和尚未在清单中锁定。
+
+        已通过上游校验的条目不算未锁定 —— 它的可信度来自签名或上游
+        哈希清单，本就不依赖清单里预先抄好的那一行。
+        """
+        if self.attestation is not None:
+            return False
         return not _is_sha256(self.expected)
 
 
@@ -62,10 +70,72 @@ def _is_sha256(value: str) -> bool:
 
 
 class Fetcher:
-    def __init__(self, cache_dir: Path, log=print) -> None:
+    def __init__(self, cache_dir: Path, log=print, repo_root: Path | None = None) -> None:
         self.cache = Path(cache_dir)
         self.cache.mkdir(parents=True, exist_ok=True)
         self.log = log
+        self.repo_root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[2]
+        self._resolver = None
+
+    @property
+    def resolver(self):
+        """延迟构造：未登记上游的场合不必付出任何代价。"""
+        if self._resolver is None:
+            from .upstream import UpstreamResolver
+
+            self._resolver = UpstreamResolver(self.repo_root, self.cache, log=self.log)
+        return self._resolver
+
+    # ── 已登记上游者走这条路 ────────────────────────────────────────
+
+    def fetch_upstream(self, spec, version: str) -> FetchResult:
+        """按上游登记信息取回归档，并证明其来源。
+
+        与 fetch() 的差别在于「期望哈希从哪来」：这里来自上游的签名或
+        哈希清单，而不是清单里预先抄好的一行。因此升级版本时只需改
+        版本号，不必再人工填 sha256 —— 填错的那类故障从根上没有了。
+        """
+        from .upstream import UpstreamError
+
+        url = spec.tarball_url(version)
+        target = self.cache / Path(url).name
+
+        # hash-index 能在下载前给出期望值，于是版本号写错、归档被换
+        # 这类问题在传输阶段就暴露，不必等几百 MB 下完。
+        pre = self.resolver.expected_hash(spec, version)
+        if pre is not None and target.exists() and target.stat().st_size > 0:
+            if sha256_file(target) == pre.sha256:
+                self.log(f"  [缓存] {target.name}")
+                return FetchResult(spec.name, target, pre.sha256, pre.sha256, False, pre)
+            self.log(f"  [失效] {target.name} 与上游哈希不符，重新下载")
+            target.unlink()
+
+        downloaded = False
+        if not target.exists() or target.stat().st_size == 0:
+            self.log(f"  [下载] {url}")
+            self._download(url, target)
+            downloaded = True
+            self._reject_html(spec.name, target)
+
+        try:
+            att = self.resolver.verify(spec, version, target)
+        except UpstreamError:
+            # 校验不过的归档不留在 cache 里，否则下次会被当成"已缓存"
+            # 直接采用 —— 那等于把一次失败的校验变成永久的放行。
+            target.unlink(missing_ok=True)
+            raise
+
+        self.log(f"  [校验] {att.summary()}")
+        return FetchResult(spec.name, target, att.sha256, att.sha256, downloaded, att)
+
+    def _reject_html(self, name: str, target: Path) -> None:
+        head = target.read_bytes()[:512].lstrip().lower()
+        if head.startswith((b"<!doctype", b"<html")):
+            target.unlink()
+            raise FetchError(
+                f"{name}: 下载到的是 HTML 页面而非归档，"
+                f"上游可能有 WAF 拦截或地址已失效"
+            )
 
     def fetch(self, name: str, url: str, expected: str) -> FetchResult:
         target = self.cache / Path(url).name
@@ -125,23 +195,28 @@ class Fetcher:
     def fetch_all(self, cfg: Config, arch: str) -> list[FetchResult]:
         """获取指定架构所需的全部上游归档。"""
         results: list[FetchResult] = []
+        ups = getattr(cfg, "upstreams", {}) or {}
 
         self.log(f"随包依赖库（{len(cfg.vendored_libs)} 项）")
         for lib in cfg.vendored_libs.values():
-            results.append(self._fetch_lib(lib))
+            results.append(self._fetch_lib(lib, ups))
 
         comps = [c for c in cfg.components.values() if not c.local_only]
         self.log(f"组件（{len(comps)} 项，架构 {arch}）")
         for comp in comps:
-            results.append(self._fetch_component(comp, arch))
+            results.append(self._fetch_component(comp, arch, ups))
 
         self._report(results)
         return results
 
-    def _fetch_lib(self, lib: VendoredLib) -> FetchResult:
+    def _fetch_lib(self, lib: VendoredLib, ups: dict) -> FetchResult:
+        if lib.name in ups:
+            return self.fetch_upstream(ups[lib.name], lib.version)
         return self.fetch(lib.name, lib.url, lib.sha256)
 
-    def _fetch_component(self, comp: Component, arch: str) -> FetchResult:
+    def _fetch_component(self, comp: Component, arch: str, ups: dict) -> FetchResult:
+        if comp.name in ups:
+            return self.fetch_upstream(ups[comp.name], comp.version_for(arch))
         url = comp.url_for(arch)
         if url is None:
             raise FetchError(f"{comp.name}: {arch} 缺少下载地址")

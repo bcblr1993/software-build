@@ -68,9 +68,8 @@ components:
   redis:
     build: compile
     # 注意：现有 x86 包为 8.2.6、ARM 包为 8.2.3，版本漂移。此处统一。
-    version: "8.2.6"
-    url: https://github.com/redis/redis/archive/refs/tags/{version}.tar.gz
-    sha256: 78dd7326c5c959202c6c3849d3ea9c61896d78d647c20f6542b52c0917f96eac
+    # 归档地址与校验凭据见 upstreams.redis —— 升级只改这一行版本号。
+    version: "8.8.0"
     vendor: [openssl]
     artifacts:
       - bin/redis-server
@@ -150,6 +149,42 @@ components:
 excluded_components:
   # 现场未使用，移除以缩减包体积与攻击面
   - chronograf
+
+# 上游登记：把「版本号 → 官方归档 + 可信校验凭据」的对应关系集中在此。
+#
+# 登记过的组件，升级时只需改上面的 version，归档由系统自动取回，期望
+# 哈希来自上游签名或上游哈希清单 —— 不必再人工抄 sha256。此前 redis
+# 从 8.2.6 改到 8.8.0 时哈希忘了跟着改，构建就是这么失败的。
+#
+# verify.method 的三级可信度（详见 scripts/sprixin_build/upstream.py）：
+#   pgp          上游私钥签名，用固化在 keys/ 的公钥验签，并断言签名者
+#                指纹在 fingerprints 白名单内 —— 只看 gpg 退出码是不够的，
+#                任何人都能自签一个归档。
+#   hash-index   上游在另一处发布的哈希清单，攻击者需同时控制两个站点。
+#   cross-source 从彼此独立的镜像各取一份比对，用于既不签名也不发哈希的项目。
+upstreams:
+  nginx:
+    tarball: https://nginx.org/download/nginx-{version}.tar.gz
+    verify:
+      method: pgp
+      signature: "{tarball}.asc"
+      keyring: keys/nginx.asc
+      # nginx 由多位核心开发者轮流签发，任一在列即可
+      fingerprints:
+        - 43387825DDB1BB97EC36BA5D007C8D7C15D87369  # Roman Arutyunyan
+        - 13C82A63B603576156E30A4EA0EA981B66B0D967  # Konstantin Pavlov
+        - D6786CE303D9A9022998DC6CC8464D549AF75C0A  # Sergey Kandaurov
+        - 41DB92713D3BF4BFF3EE91069C5E7FA2F54977D4  # Maxim Dounin
+        - 7338973069ED3F443F4D37DFA64FD5B17ADB39A8  # Sergey Budnevitch
+
+  redis:
+    # 官方发布的 tarball，与 GitHub 自动生成的 archive 并非同一个文件，
+    # 两者哈希不同。此处取官方发布版，其哈希才与官方哈希清单对得上。
+    tarball: https://download.redis.io/releases/redis-{version}.tar.gz
+    verify:
+      method: hash-index
+      index: https://raw.githubusercontent.com/redis/redis-hashes/master/README
+      pattern: '^hash\s+redis-{version}\.tar\.gz\s+sha256\s+([0-9a-f]{64})'
 
 # 安装包内的静态文件，来自 overlay/，打包时原样复制。
 # install.sh / startup.sh / shutdown.sh 的行为必须与现有包保持一致。

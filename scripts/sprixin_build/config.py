@@ -105,6 +105,8 @@ class Config:
     overlay_files: list[str]
     excluded_components: list[str]
     source_path: Path
+    #: 组件名 → 上游登记信息。空表示该组件未登记，仍走清单里的静态 sha256。
+    upstreams: dict = field(default_factory=dict)
 
     # ── 读取 ────────────────────────────────────────────────────────
 
@@ -161,7 +163,20 @@ class Config:
                 note=spec.get("note"),
             )
 
+        # 上游登记：把「版本号 → 官方归档 + 可信校验凭据」的对应关系集中在
+        # 清单里。解析放在 upstream 模块，此处只做加载与格式校验，避免
+        # config 依赖 gpg 等运行时能力。
+        from .upstream import UpstreamError, UpstreamSpec
+
+        ups: dict = {}
+        for name, spec in (raw.get("upstreams") or {}).items():
+            try:
+                ups[name] = UpstreamSpec.from_dict(name, spec)
+            except UpstreamError as exc:
+                raise ConfigError(str(exc)) from None
+
         cfg = cls(
+            upstreams=ups,
             package_name=_require(pkg, "name", str, ctx="package"),
             package_version=str(_require(pkg, "version", str, ctx="package")),
             top_dir=_require(pkg, "top_dir", str, ctx="package"),
@@ -195,6 +210,10 @@ class Config:
                     )
             if comp.local_only:
                 continue
+            # 已登记上游者由 upstreams 段提供地址与校验凭据，此处不再要求
+            # 重复写 url —— 同一件事只记一处，免得两边漂移。
+            if comp.name in self.upstreams:
+                continue
             for arch in self.architectures:
                 if comp.url_for(arch) is None:
                     raise ConfigError(f"组件 {comp.name} 在 {arch} 上缺少下载地址")
@@ -205,11 +224,15 @@ class Config:
         允许存在（首次引入组件时需要先下载才能得到校验和），
         但构建时会明确提示，避免在无人值守流程里静默跳过完整性校验。
         """
-        pending = [f"vendored_libs.{n}" for n, l in self.vendored_libs.items() if not l.locked]
+        pending = [
+            f"vendored_libs.{n}"
+            for n, l in self.vendored_libs.items()
+            if not l.locked and n not in self.upstreams
+        ]
         pending += [
             f"components.{n}"
             for n, c in self.components.items()
-            if not c.locked and not c.local_only
+            if not c.locked and not c.local_only and n not in self.upstreams
         ]
         return pending
 
