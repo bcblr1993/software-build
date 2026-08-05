@@ -41,17 +41,54 @@ cleanup() {
 trap cleanup EXIT
 
 echo "挂载 $BASE_NAME"
-mount -o loop,ro "$ISO" "$MNT"
+# loop 设备数量受内核 max_loop 限制（多数发行版为 8）。并行构建时若干实例
+# 同时持有挂载，再加上其它进程占用，很容易耗尽而挂载失败 —— 表现为脚本
+# 在挂载这一步无声退出。此处重试等待，让先完成的实例先释放。
+mounted=0
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if mount -o loop,ro "$ISO" "$MNT" 2>/dev/null; then
+    mounted=1
+    break
+  fi
+  [ "$attempt" = 1 ] && echo "  loop 设备暂不可用，等待重试（当前已用 $(losetup -a 2>/dev/null | wc -l) 个，上限 $(cat /sys/module/loop/parameters/max_loop 2>/dev/null || echo '?')）"
+  sleep $((attempt * 5))
+done
 
-# 目标架构：由 glibc 包的架构后缀判定，比解析文件名可靠。
-# 安装盘常同时收录 32 位包（麒麟信安 3.3 即带有 i686 的 glibc），
-# 若取到第一个匹配就可能判成 i686，进而给 rootfs 补进一堆 32 位库。
-# 因此显式排除 32 位架构。
-ARCH="$(find "$MNT" -name 'glibc-[0-9]*.rpm' 2>/dev/null \
-        | sed -E 's/.*\.([a-z0-9_]+)\.rpm$/\1/' \
-        | grep -vE '^(i[3-6]86|noarch)$' \
-        | sort -u | head -1)"
-[ -n "$ARCH" ] || { echo "在 ISO 中找不到 64 位 glibc 包，无法判定架构" >&2; exit 1; }
+if [ "$mounted" != 1 ]; then
+  echo "挂载失败：loop 设备耗尽或 ISO 损坏" >&2
+  echo "  可提高上限：modprobe -r loop && modprobe loop max_loop=32" >&2
+  echo "  或降低并发：SPRIXIN_PARALLEL=2 compat/build-all.sh" >&2
+  exit 1
+fi
+
+# 包格式：并非所有目标系统都是 EL 系 —— 凝思 6.0.80 与 6.0.100 实为
+# Debian 系（分别基于 jessie 与 buster），盘内是 .deb 而非 .rpm。
+if find "$MNT" -maxdepth 3 -name '*.rpm' -print -quit 2>/dev/null | grep -q .; then
+  PKGFMT=rpm
+elif [ -d "$MNT/dists" ] || find "$MNT" -maxdepth 3 -name '*.deb' -print -quit 2>/dev/null | grep -q .; then
+  PKGFMT=deb
+else
+  echo "无法识别安装盘的软件包格式（既无 .rpm 也无 .deb）" >&2
+  exit 1
+fi
+echo "软件包格式 $PKGFMT"
+
+# 目标架构：由 libc 包的架构后缀判定，比解析 ISO 文件名可靠。
+# 安装盘常同时收录 32 位包（麒麟信安 3.3 带有 i686 的 glibc），
+# 若取第一个匹配就可能判成 i686，进而给 rootfs 补进一堆 32 位库。
+if [ "$PKGFMT" = rpm ]; then
+  ARCH="$(find "$MNT" -name 'glibc-[0-9]*.rpm' 2>/dev/null \
+          | sed -E 's/.*\.([a-z0-9_]+)\.rpm$/\1/' \
+          | grep -vE '^(i[3-6]86|noarch)$' \
+          | sort -u | head -1)"
+else
+  # Debian 的架构名与 RPM 不同：amd64 / arm64
+  ARCH="$(find "$MNT" -name 'libc6_[0-9]*.deb' 2>/dev/null \
+          | sed -E 's/.*_([a-z0-9]+)\.deb$/\1/' \
+          | grep -vE '^(i386|all)$' \
+          | sort -u | head -1)"
+fi
+[ -n "$ARCH" ] || { echo "在 ISO 中找不到 64 位 libc 包，无法判定架构" >&2; exit 1; }
 echo "目标架构 $ARCH"
 
 # 验证所需的最小包集合。
@@ -93,14 +130,43 @@ WANTED=(
   kysec-base libkysec kysec-utils
 )
 
+# Debian 系的包名自成体系，与 EL 系没有对应关系：
+# glibc→libc6、zlib→zlib1g、openssl-libs→libssl1.1、ncurses-libs→libtinfo5、
+# procps-ng→procps。故单列一份，而非试图做名称映射。
+WANTED_DEB=(
+  libc6 libc-bin base-files
+  bash dash
+  coreutils findutils grep sed gawk mawk
+  libtinfo5 libtinfo6 ncurses-base ncurses-bin libncurses5 libncursesw5
+  libselinux1 libpcre3 libcap2 libattr1 libacl1
+  libcrypt1 libgcc1 libgcc-s1 libstdc++6
+  zlib1g libssl1.1 libssl1.0.0 libssl3
+  tar gzip xz-utils bzip2
+  procps psmisc
+  curl libcurl4 libcurl3
+  hostname util-linux debianutils
+  net-tools iproute2
+  libreadline7 libreadline6 libsigsegv2 libmpfr6 libmpfr4
+  libbz2-1.0 liblzma5 libgmp10
+)
+
 echo "收集软件包"
 pkgs=()
-for want in "${WANTED[@]}"; do
-  # 精确匹配 <名称>-<版本起始数字>，避免 glibc 匹配到 glibc-devel/glibc-headers
-  while IFS= read -r rpm; do
-    pkgs+=("$rpm")
-  done < <(find "$MNT" -name "${want}-[0-9]*.${ARCH}.rpm" -o -name "${want}-[0-9]*.noarch.rpm" 2>/dev/null | sort -V | tail -1)
-done
+if [ "$PKGFMT" = rpm ]; then
+  for want in "${WANTED[@]}"; do
+    # 精确匹配 <名称>-<版本起始数字>，避免 glibc 匹配到 glibc-devel/glibc-headers
+    while IFS= read -r rpm; do
+      pkgs+=("$rpm")
+    done < <(find "$MNT" -name "${want}-[0-9]*.${ARCH}.rpm" -o -name "${want}-[0-9]*.noarch.rpm" 2>/dev/null | sort -V | tail -1)
+  done
+else
+  for want in "${WANTED_DEB[@]}"; do
+    # deb 的命名为 <包名>_<版本>_<架构>.deb，用下划线分隔避免前缀误匹配
+    while IFS= read -r deb; do
+      pkgs+=("$deb")
+    done < <(find "$MNT" -name "${want}_*_${ARCH}.deb" -o -name "${want}_*_all.deb" 2>/dev/null | sort -V | tail -1)
+  done
+fi
 
 if [ "${#pkgs[@]}" -eq 0 ]; then
   echo "未找到任何可用软件包" >&2
@@ -110,25 +176,58 @@ echo "选定 ${#pkgs[@]} 个包"
 
 # 拷到工作目录，避免容器直接读 ISO 挂载点
 mkdir -p "$WORK/rpms" "$WORK/rootfs"
-for rpm in "${pkgs[@]}"; do
-  cp "$rpm" "$WORK/rpms/"
+for pkg in "${pkgs[@]}"; do
+  cp "$pkg" "$WORK/rpms/"
 done
 
 echo "解包"
 docker run --rm \
   -v "$WORK:/work" \
+  -e PKGFMT="$PKGFMT" \
   "$TOOL_IMAGE" bash -c '
     set -e
     cd /work/rootfs
-    for r in /work/rpms/*.rpm; do
-      rpm2cpio "$r" | cpio -idmu --quiet 2>/dev/null || true
-    done
+    if [ "$PKGFMT" = rpm ]; then
+      for r in /work/rpms/*.rpm; do
+        rpm2cpio "$r" | cpio -idmu --quiet 2>/dev/null || true
+      done
+    else
+      # deb 是 ar 归档，内含 data.tar.{gz,xz,bz2}；基线镜像的 binutils
+      # 提供 ar，无需 dpkg
+      for d in /work/rpms/*.deb; do
+        tmp=$(mktemp -d)
+        (cd "$tmp" && ar x "$d" 2>/dev/null) || { rm -rf "$tmp"; continue; }
+        for data in "$tmp"/data.tar.*; do
+          [ -e "$data" ] || continue
+          tar -xf "$data" -C /work/rootfs 2>/dev/null || true
+        done
+        rm -rf "$tmp"
+      done
+    fi
     # 目录布局补全：部分发行版把 /lib 等做成指向 /usr 的符号链接，
     # 只解包不会重建它们
     for d in bin sbin lib lib64; do
       if [ ! -e "/work/rootfs/$d" ] && [ -d "/work/rootfs/usr/$d" ]; then
         ln -s "usr/$d" "/work/rootfs/$d"
       fi
+    done
+
+    # Debian 用 alternatives 机制提供 awk、sh 等通用名，这些符号链接由
+    # 安装脚本创建，仅解包不会生成。verify.sh 要用 awk 从 redis.conf
+    # 取 requirepass，缺了会被误判为验证失败。
+    for slot in "awk mawk gawk original-awk" "sh dash bash"; do
+      set -- $slot
+      generic=$1; shift
+      for d in /work/rootfs/usr/bin /work/rootfs/bin; do
+        [ -d "$d" ] || continue
+        [ -e "$d/$generic" ] && break
+        for impl in "$@"; do
+          if [ -x "$d/$impl" ]; then
+            ln -sf "$impl" "$d/$generic"
+            break 2
+          fi
+        done
+      done
     done
     mkdir -p /work/rootfs/{proc,sys,dev,tmp,etc,var/tmp,run}
     chmod 1777 /work/rootfs/tmp /work/rootfs/var/tmp
@@ -176,13 +275,24 @@ resolve_deps() {
       [ -f "$rpm" ] || continue
       [ -e "$WORK/rpms/$(basename "$rpm")" ] && continue
       cp "$rpm" "$WORK/rpms/"
-      docker run --rm -v "$WORK:/work" "$TOOL_IMAGE" bash -c \
-        "cd /work/rootfs && rpm2cpio /work/rpms/$(basename "$rpm") | cpio -idmu --quiet 2>/dev/null || true"
+      if [ "$PKGFMT" = rpm ]; then
+        docker run --rm -v "$WORK:/work" "$TOOL_IMAGE" bash -c \
+          "cd /work/rootfs && rpm2cpio /work/rpms/$(basename "$rpm") | cpio -idmu --quiet 2>/dev/null || true"
+      else
+        docker run --rm -v "$WORK:/work" "$TOOL_IMAGE" bash -c \
+          "t=\$(mktemp -d); cd \$t && ar x /work/rpms/$(basename "$rpm") && for f in \$t/data.tar.*; do tar -xf \"\$f\" -C /work/rootfs 2>/dev/null || true; done; rm -rf \$t"
+      fi
       echo "    $so ← $(basename "$rpm")"
       added=$((added + 1))
-    done < <(python3 "$(dirname "$0")/rpm-index.py" "$MNT" --arch "$ARCH" $missing 2>/dev/null)
+    done < <(
+      if [ "$PKGFMT" = rpm ]; then
+        python3 "$(dirname "$0")/rpm-index.py" "$MNT" --arch "$ARCH" $missing 2>/dev/null
+      else
+        python3 "$(dirname "$0")/deb-index.py" "$MNT" --arch "$ARCH" $missing 2>/dev/null
+      fi
+    )
 
-    [ "$added" -eq 0 ] && { echo "  仍有缺失且 repodata 中无提供者:$missing"; return 1; }
+    [ "$added" -eq 0 ] && { echo "  仍有缺失且包索引中无提供者:$missing"; return 1; }
   done
   return 1
 }
@@ -210,11 +320,21 @@ echo "自检"
 glibc_ver="$(docker run --rm "$TAG" ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' || echo '?')"
 os_name="$(docker run --rm "$TAG" bash -c '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"' 2>/dev/null || echo '')"
 
+# 用实际功能而非 --version 判定：并非所有实现都支持该参数，
+# Debian 默认的 mawk 就只认 -W version，据此会被误判为无法运行。
 broken="$(docker run --rm "$TAG" bash -c '
   missing=""
-  for c in bash sed grep awk ldd find cat ls; do
+  for c in bash sed grep awk find cat ls ldd; do
     command -v $c >/dev/null 2>&1 || { missing="$missing $c(缺失)"; continue; }
-    $c --version >/dev/null 2>&1 || $c --help >/dev/null 2>&1 || missing="$missing $c(无法运行)"
+    case $c in
+      awk)  echo x | $c "{print}"      >/dev/null 2>&1 || missing="$missing $c(无法运行)" ;;
+      sed)  echo x | $c "s/x/y/"       >/dev/null 2>&1 || missing="$missing $c(无法运行)" ;;
+      grep) echo x | $c x              >/dev/null 2>&1 || missing="$missing $c(无法运行)" ;;
+      find) $c /etc -maxdepth 0        >/dev/null 2>&1 || missing="$missing $c(无法运行)" ;;
+      cat)  $c /etc/hostname           >/dev/null 2>&1 || $c /proc/self/status >/dev/null 2>&1 || missing="$missing $c(无法运行)" ;;
+      ls)   $c /                       >/dev/null 2>&1 || missing="$missing $c(无法运行)" ;;
+      *)    $c --version >/dev/null 2>&1 || $c --help >/dev/null 2>&1 || missing="$missing $c(无法运行)" ;;
+    esac
   done
   echo "$missing"
 ' 2>/dev/null)"
