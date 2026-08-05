@@ -37,7 +37,9 @@ read -r -d '' TEST_BODY <<'BODY_EOF'
 set -u
 cd /work || exit 1
 
-echo "当前身份: $(id -un)  uid=$(id -u)"
+# 以 --user 指定的 uid 运行时，/etc/passwd 中可能没有对应条目，
+# id -un 会失败，故只取 uid
+echo "当前身份: uid=$(id -u)  $([ "$(id -u)" = 0 ] && echo '(root)' || echo '(普通用户，无 root 权限)')"
 echo
 
 echo "── 解压 ──"
@@ -100,40 +102,20 @@ bash shutdown.sh all 2>&1 | tail -8
 exit $rc
 BODY_EOF
 
-# ── 容器入口：root 预置后切换身份 ───────────────────────────────────
+# ── 容器入口 ────────────────────────────────────────────────────────
+#
+# 身份切换交给 docker --user，而不是在容器内 useradd/su：最小 rootfs 未必
+# 带 shadow-utils，各发行版对它的拆包命名也不一致（Anolis 与 CentOS 7 的
+# 验证容器里既无 su 也无 hostname）。用 --user 则不依赖容器内的任何工具。
+#
+# 主机名解析同理交给 docker：--hostname 会自动写入容器的 /etc/hosts，
+# 满足 rabbitmq 对自身主机名可解析的要求，无需以 root 改文件。
 read -r -d '' RUNNER <<RUNNER_EOF
 set -u
-
-# 主机名解析是 rabbitmq 的硬需求，普通用户改不了 /etc/hosts，
-# 因此由 root 预先补好 —— 现场同样应由系统管理员事先配置。
-grep -q "\$(hostname)" /etc/hosts 2>/dev/null || echo "127.0.0.1 \$(hostname)" >> /etc/hosts
-
 cat > /tmp/test-body.sh <<'INNER_EOF'
 $TEST_BODY
 INNER_EOF
-chmod 0755 /tmp/test-body.sh
-
-if [ "$RUN_AS_ROOT" = "1" ]; then
-  exec bash /tmp/test-body.sh
-fi
-
-# 用与现场同类的普通用户：无 root、无 sudo。
-# 直接写 /etc/passwd 而不用 useradd —— 最小 rootfs 里未必有 shadow-utils，
-# 且各发行版对它的拆包命名并不一致。
-if ! id sprixin >/dev/null 2>&1; then
-  echo 'sprixin:x:1000:1000::/home/sprixin:/bin/bash' >> /etc/passwd
-  echo 'sprixin:x:1000:' >> /etc/group
-  mkdir -p /home/sprixin
-  chown 1000:1000 /home/sprixin
-fi
-
-if ! id sprixin >/dev/null 2>&1; then
-  echo "无法创建普通用户，改以 root 运行（本次验证不覆盖权限相关问题）"
-  exec bash /tmp/test-body.sh
-fi
-
-chown -R 1000:1000 /work 2>/dev/null
-exec su sprixin -c "bash /tmp/test-body.sh"
+exec bash /tmp/test-body.sh
 RUNNER_EOF
 
 run_in() {
@@ -150,6 +132,14 @@ run_in() {
   chmod 755 "$workdir" "$pkgdir"
   chmod 644 "$pkgdir/package.tar.gz"
 
+  local user_args=()
+  if [ "$RUN_AS_ROOT" != "1" ]; then
+    # 与现场一致：普通用户、无 root。uid 取 1000 而非某个具体用户名 ——
+    # 现场用户名并不固定，脚本也不应依赖它。
+    chown -R 1000:1000 "$workdir" 2>/dev/null
+    user_args=(--user 1000:1000 -e HOME=/work)
+  fi
+
   echo
   echo "────────────────────────────────────────────────────────────────────"
   echo " $tag"
@@ -160,6 +150,7 @@ run_in() {
     -v "$pkgdir:/pkg:ro" \
     --shm-size=256m \
     --hostname sprixin-e2e \
+    "${user_args[@]}" \
     "$image" bash -c "$RUNNER"
   local rc=$?
 
