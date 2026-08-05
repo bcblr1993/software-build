@@ -146,6 +146,8 @@
       <label class="row" style="gap:6px"><input type="radio" name="arch" value="x86_64" checked> x86_64</label>
       <label class="row" style="gap:6px"><input type="radio" name="arch" value="aarch64"> aarch64</label>
       <span style="flex:1"></span>
+      <button id="package-btn">仅打包</button>
+      <button id="verify-btn">目标系统验证</button>
       <button class="primary" id="build-btn">开始构建</button>
     </div>
     <div id="log" style="margin-top:16px">等待构建…</div>
@@ -251,6 +253,12 @@ $('#save-btn').onclick = async () => {
 };
 
 let es = null;
+function enableActions() {
+  ['#build-btn', '#package-btn', '#verify-btn'].forEach(b => {
+    const el = $(b); if (el) el.disabled = false;
+  });
+}
+
 function attachLog() {
   if (es) es.close();
   $('#log').textContent = '';
@@ -261,14 +269,14 @@ function attachLog() {
       const rc = line.split(' ')[1];
       appendLog(rc === '0' ? '构建完成' : `构建失败（退出码 ${rc}）`, rc === '0' ? 's' : 'e');
       es.close(); es = null;
-      $('#build-btn').disabled = false;
+      enableActions();
       $('#busy-state').textContent = '';
       loadHistory();
       return;
     }
     appendLog(line);
   };
-  es.onerror = () => { if (es) { es.close(); es = null; } $('#build-btn').disabled = false; };
+  es.onerror = () => { if (es) { es.close(); es = null; } enableActions(); };
 }
 
 function appendLog(line, cls) {
@@ -285,18 +293,30 @@ function appendLog(line, cls) {
   el.scrollTop = el.scrollHeight;
 }
 
-$('#build-btn').onclick = async () => {
+const ACTION_LABEL = {build: '构建', package: '打包', verify: '目标系统验证'};
+
+async function runAction(action) {
   const arch = document.querySelector('input[name=arch]:checked').value;
-  $('#build-btn').disabled = true;
-  const {ok, data} = await api('/api/build', {method: 'POST', body: JSON.stringify({arch, components: []})});
+  const btns = ['#build-btn', '#package-btn', '#verify-btn'];
+  btns.forEach(b => $(b).disabled = true);
+
+  const {ok, data} = await api('/api/build', {
+    method: 'POST',
+    body: JSON.stringify({arch, action, components: []})
+  });
+
   if (!ok) {
-    appendLog(data.error || data.message || '无法启动构建', 'e');
-    $('#build-btn').disabled = false;
+    appendLog(data.error || data.message || `无法启动${ACTION_LABEL[action]}`, 'e');
+    btns.forEach(b => $(b).disabled = false);
     return;
   }
-  $('#busy-state').textContent = '构建进行中';
+  $('#busy-state').textContent = `${ACTION_LABEL[action]}进行中`;
   attachLog();
-};
+}
+
+$('#build-btn').onclick   = () => runAction('build');
+$('#package-btn').onclick = () => runAction('package');
+$('#verify-btn').onclick  = () => runAction('verify');
 
 async function loadHistory() {
   const {ok, data} = await api('/api/history');

@@ -86,34 +86,70 @@ class BuildRunner:
                 except queue.Full:
                     pass
 
-    def start(self, *, arch: str, components: list[str], operator: str) -> tuple[bool, str]:
+    def start(
+        self,
+        *,
+        arch: str,
+        components: list[str],
+        operator: str,
+        action: str = "build",
+    ) -> tuple[bool, str]:
+        """启动一项任务。
+
+        action 取值：
+            build    编译 + 门禁 + 内层归档
+            package  组装安装包（不重新编译）
+            verify   在全部目标系统容器中完整安装并启动
+        """
+        if action not in ("build", "package", "verify"):
+            return False, f"未知的操作: {action}"
+
         with self._lock:
             if self.busy:
-                return False, "已有构建在进行中"
+                return False, "已有任务在进行中"
             self._history = []
             self._current = {
+                "action": action,
                 "arch": arch,
                 "components": components,
                 "operator": operator,
                 "started_at": time.time(),
             }
         threading.Thread(
-            target=self._run, args=(arch, components, operator), daemon=True
+            target=self._run, args=(action, arch, components, operator), daemon=True
         ).start()
-        return True, "构建已启动"
+        return True, {"build": "构建已启动", "package": "打包已启动", "verify": "验证已启动"}[action]
 
-    def _run(self, arch: str, components: list[str], operator: str) -> None:
-        import subprocess
+    def _build_command(self, action: str, arch: str, components: list[str]) -> list[str]:
+        if action == "verify":
+            # 取该架构最近产出的安装包
+            dist = self.workspace / "dist" / arch
+            pkgs = sorted(dist.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not pkgs:
+                return []
+            return ["bash", str(self.repo_root / "compat" / "e2e-test.sh"), str(pkgs[0])]
 
         cmd = [
             sys.executable,
             str(self.repo_root / "scripts" / "build.py"),
             "--workspace", str(self.workspace),
-            "build",
+            action,
             "--arch", arch,
         ]
-        for c in components:
-            cmd += ["--component", c]
+        if action == "build":
+            for c in components:
+                cmd += ["--component", c]
+        return cmd
+
+    def _run(self, action: str, arch: str, components: list[str], operator: str) -> None:
+        import subprocess
+
+        cmd = self._build_command(action, arch, components)
+        if not cmd:
+            self._emit(f"{arch} 尚无可验证的安装包，请先执行构建与打包")
+            self._emit("__DONE__ 1")
+            self._current = None
+            return
 
         self._emit(f"$ {' '.join(cmd)}")
         rc = 1
@@ -409,11 +445,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_build(self, body: dict, subject: str) -> None:
         arch = str(body.get("arch") or "x86_64")
+        action = str(body.get("action") or "build")
         components = body.get("components") or []
         if not isinstance(components, list):
             components = []
         ok, msg = self.server.runner.start(
-            arch=arch, components=[str(c) for c in components], operator=subject
+            arch=arch,
+            components=[str(c) for c in components],
+            operator=subject,
+            action=action,
         )
         self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
 
