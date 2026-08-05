@@ -94,6 +94,38 @@ def sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _derive_archive_name(component: str, version: str, original: str = "") -> str:
+    """决定内层归档的文件名。
+
+    优先沿用基准包中的命名形式，仅把其中的版本号替换为新版本，从而在升级
+    组件时既反映新版本，又保持 chronograf-…_linux_amd64.tar.gz 这类后缀不变。
+    """
+    default = f"{component}-{version}.tar.gz"
+    if not original or not original.startswith(f"{component}-"):
+        return default
+
+    # 取出原名中 <组件名>- 之后、.tar.gz 之前的部分，其中含旧版本号
+    stem = original[len(component) + 1:]
+    for suffix in (".tar.gz", ".tgz"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+
+    old_version = re.match(r"^([0-9][0-9A-Za-z._]*)", stem)
+    if not old_version:
+        # 形如 nacos-server-2.2.3：版本号不在紧邻组件名之处
+        m = re.search(r"[0-9][0-9A-Za-z._]*", stem)
+        if not m:
+            return default
+        old_version = m
+
+    if old_version.group(0) == version:
+        return original
+
+    new_stem = stem[: old_version.start()] + version + stem[old_version.end():]
+    return f"{component}-{new_stem}.tar.gz"
+
+
 def _should_skip(name: str) -> bool:
     base = Path(name).name
     if base in RUNTIME_JUNK or base.startswith(JUNK_PREFIXES):
@@ -120,10 +152,21 @@ class Packager:
 
     # ── 内层归档 ────────────────────────────────────────────────────
 
-    def make_inner(self, component: str, version: str, src_dir: Path) -> InnerArchive:
+    def make_inner(
+        self,
+        component: str,
+        version: str,
+        src_dir: Path,
+        original_name: str = "",
+    ) -> InnerArchive:
         """把一个组件目录打成内层归档。
 
-        产出 <component>-<version>.tar.gz，内含单层顶层目录 <component>/。
+        默认产出 <component>-<version>.tar.gz，内含单层顶层目录 <component>/。
+
+        若给出基准包中的原始文件名，则沿用其命名形式 —— 现有包中存在
+        nacos-server-2.2.3.tar.gz、chronograf-1.10.1_linux_amd64.tar.gz
+        这类带后缀的名字，虽然 install.sh 的 ${i%%-*} 同样能解析出组件名，
+        但既然要求安装结构保持一致，文件名就不该无谓地变动。
         """
         if not _NAME_RE.match(component):
             raise PackageError(
@@ -134,7 +177,7 @@ class Packager:
         if not src_dir.is_dir():
             raise PackageError(f"组件目录不存在: {src_dir}")
 
-        dest = self.out / f"{component}-{version}.tar.gz"
+        dest = self.out / _derive_archive_name(component, version, original_name)
         dest.unlink(missing_ok=True)
 
         entries: list[tuple[str, Path]] = []

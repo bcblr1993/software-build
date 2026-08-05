@@ -14,6 +14,7 @@ Web 控制台调用的是同一套 sprixin_build 包，两条入口的构建逻�
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -35,6 +36,12 @@ from sprixin_build import (  # noqa: E402
     run_gate,
 )
 from sprixin_build.packager import Packager, PackageError, clean_tree  # noqa: E402
+from sprixin_build.report import (  # noqa: E402
+    ComponentInfo,
+    load_secrets,
+    render_source_file,
+    render_upgrade_report,
+)
 
 # 归档源地址：x86_64 走 centos-vault，aarch64 走 centos-altarch
 VAULT_URLS = {
@@ -113,11 +120,13 @@ def cmd_import_base(args, cfg: Config, ws: Workspace) -> int:
         return 1
 
     count = 0
+    archives: dict[str, str] = {}
     for archive in sorted(software.iterdir()):
         if not archive.name.endswith((".tar.gz", ".tgz")):
             continue
         # install.sh 用 ${i%%-*} 取组件名，此处保持一致
         comp = archive.name.split("-")[0]
+        archives[comp] = archive.name
         target = dest / comp
         target.mkdir(parents=True, exist_ok=True)
         try:
@@ -150,8 +159,24 @@ def cmd_import_base(args, cfg: Config, ws: Workspace) -> int:
         if item.is_file():
             shutil.copy2(item, dest / item.name)
 
+    # 记录组件与原始归档名的对应关系。
+    # 打包时需要还原原始文件名（含版本号），且基准包中可能存在清单未定义的
+    # 组件 —— ARM 包的 compat-libs 即是一例，漏掉它会导致新包缺少内容。
+    manifest = {
+        "source_package": src.name,
+        "arch": args.arch,
+        "imported_at": datetime.now().isoformat(timespec="seconds"),
+        "components": archives,
+    }
+    (dest / "import-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
     shutil.rmtree(staging)
     log(f"\n基准包已导入 {count} 个组件 → {dest}")
+    unknown = [n for n in archives if n not in cfg.components]
+    if unknown:
+        log(f"其中 {', '.join(unknown)} 未在组件清单中定义，将按原样打包")
     return 0
 
 
@@ -261,30 +286,247 @@ def cmd_build(args, cfg: Config, ws: Workspace) -> int:
         log("\n按要求跳过打包")
         return 0
 
-    section("打包")
-    packager = Packager(out_dir=ws.dist / arch / "software", log=log)
+    return do_package(args, cfg, ws, arch=arch, gate_summary=result.summary(),
+                      started=started)
+
+
+def do_package(args, cfg: Config, ws: Workspace, *, arch: str,
+               gate_summary: str = "", started: float | None = None) -> int:
+    """组装完整安装包。
+
+    组件来源有两处：新编译的取自 out/，其余（Java/Go 产物等无需编译的）
+    取自基准包。基准包中可能存在组件清单未定义的内容 —— ARM 包的
+    compat-libs 即是一例，必须一并打包，否则新包会比原包少东西。
+    """
+    section(f"组装安装包（{arch}）")
+
+    base_dir = ws.arch_base(arch)
+    out_dir = ws.arch_out(arch)
+
+    manifest_path = base_dir / "import-manifest.json"
+    archives: dict[str, str] = {}
+    if manifest_path.exists():
+        try:
+            archives = json.loads(manifest_path.read_text(encoding="utf-8")).get("components", {})
+        except (OSError, json.JSONDecodeError):
+            archives = {}
+
+    # 汇总所有组件：新编译的优先，其余取自基准包
+    sources: dict[str, Path] = {}
+    if base_dir.is_dir():
+        for d in sorted(base_dir.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                sources[d.name] = d
+    if out_dir.is_dir():
+        for d in sorted(out_dir.iterdir()):
+            if d.is_dir():
+                sources[d.name] = d
+
+    for name in cfg.excluded_components:
+        if sources.pop(name, None) is not None:
+            log(f"  排除组件: {name}（已在清单中声明不再发布）")
+
+    if not sources:
+        log("没有可打包的组件，请先执行 build 或 import-base")
+        return 1
+
+    stage_dir = ws.dist / arch / "software"
+    if stage_dir.exists():
+        shutil.rmtree(stage_dir)
+    packager = Packager(out_dir=stage_dir, log=log)
+
     inner = []
+    infos: list[ComponentInfo] = []
     try:
-        for comp_dir in sorted(ws.arch_out(arch).iterdir()):
-            if not comp_dir.is_dir():
-                continue
-            comp = cfg.components.get(comp_dir.name)
-            version = comp.version_for(arch) if comp else "0"
-            removed = clean_tree(comp_dir)
+        for name, path in sorted(sources.items()):
+            comp = cfg.components.get(name)
+            if comp:
+                version = comp.version_for(arch)
+                kind = comp.build
+            else:
+                # 清单未定义：从基准包的原始归档名还原版本，保持文件名一致
+                original = archives.get(name, "")
+                version = original[len(name) + 1:].replace(".tar.gz", "").replace(".tgz", "") or "1.0"
+                kind = "repack"
+
+            removed = clean_tree(path)
             if removed:
-                log(f"  {comp_dir.name}: 清理运行时残留 {removed} 项")
-            inner.append(packager.make_inner(comp_dir.name, version, comp_dir))
+                log(f"  {name}: 清理运行时残留 {removed} 项")
+
+            item = packager.make_inner(
+                name, version, path, original_name=archives.get(name, "")
+            )
+            inner.append(item)
+            infos.append(ComponentInfo(
+                name=name, version=version, build=kind,
+                sha256=item.sha256, size=item.size,
+                source_url=(comp.url_for(arch) or "") if comp else "",
+                source_sha256=(comp.sha256 if comp and comp.locked else ""),
+            ))
     except PackageError as exc:
         log(str(exc))
         return 1
 
-    if not inner:
-        log("没有可打包的产物")
+    # ── 与既有包对照 ────────────────────────────────────────────
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    will_produce = f"{cfg.package_name}-{arch}-{cfg.package_version}-{stamp}.tar.gz"
+    previous = _find_previous_package(ws, arch, exclude=will_produce)
+    changes: dict[str, str] = {}
+
+    # ── 生成 SOURCE 文件 ────────────────────────────────────────
+    secrets = load_secrets(ws.root / "secrets" / "package-secrets.yaml")
+    if not secrets:
+        log("提示: 未找到 secrets/package-secrets.yaml，SOURCE 中将不含默认账号信息")
+
+    verified = _load_verified_targets(ws, arch)
+
+    source_text = render_source_file(
+        package_name=cfg.package_name,
+        package_version=cfg.package_version,
+        arch=arch,
+        baseline_glibc=cfg.glibc_max,
+        components=infos,
+        vendored={n: l.version for n, l in cfg.vendored_libs.items()},
+        secrets=secrets,
+        verified_targets=verified,
+    )
+
+    extra = {
+        f"SOURCE-{cfg.package_name}-{arch}.txt": source_text,
+        f"version.{cfg.package_version}": f"{cfg.package_version}\n{arch}\n",
+    }
+
+    # 基准包顶层的其余文件（如 README-LinxOS-6.0.99.md）一并保留：
+    # 现场可能依赖它们，不该因为换了构建方式就凭空消失。
+    generated_prefixes = ("SOURCE-", "version.", "import-manifest")
+    for item in sorted(base_dir.iterdir()):
+        if not item.is_file():
+            continue
+        if item.name in cfg.overlay_files:
+            continue
+        if item.name.startswith(generated_prefixes):
+            continue
+        try:
+            extra[item.name] = item.read_text(encoding="utf-8")
+            log(f"  保留基准包文件: {item.name}")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    # ── 组装 ────────────────────────────────────────────────────
+    overlay_dir = REPO_ROOT / "overlay"
+    missing = [f for f in cfg.overlay_files if not (overlay_dir / f).exists()]
+    if missing:
+        # 缺失的脚本从基准包补齐，保证现场行为不变
+        for f in missing:
+            src = base_dir / f
+            if src.exists():
+                shutil.copy2(src, overlay_dir / f)
+                log(f"  从基准包补入 overlay/{f}")
+        missing = [f for f in cfg.overlay_files if not (overlay_dir / f).exists()]
+        if missing:
+            log(f"overlay 缺少文件: {', '.join(missing)}")
+            return 1
+
+    try:
+        result = packager.assemble(
+            package_name=cfg.package_name,
+            top_dir=cfg.top_dir,
+            arch=arch,
+            version_tag=cfg.package_version,
+            inner=inner,
+            overlay_dir=overlay_dir,
+            overlay_files=cfg.overlay_files,
+            extra_files=extra,
+            dest_dir=ws.dist / arch,
+        )
+    except PackageError as exc:
+        log(str(exc))
         return 1
 
-    log(f"\n本轮产出 {len(inner)} 个内层归档，用时 {time.time() - started:.0f}s")
-    log("完整外层包的组装需要全部组件就绪，当前仅编译组件已完成。")
+    checksums = packager.write_checksums(result, ws.dist / arch / "SHA256SUMS")
+    log(f"  校验和清单: {checksums}")
+
+    if previous:
+        log(f"\n与既有包对照: {previous.name}")
+        changes = Packager.compare_with(previous, result)
+        if "__error__" in changes:
+            log(f"  {changes['__error__']}")
+            changes = {}
+        else:
+            for info in infos:
+                info.changed = changes.get(f"{info.name}-{info.version}.tar.gz", "")
+            if changes:
+                for fname, state in sorted(changes.items()):
+                    log(f"  {state}: {fname}")
+            else:
+                log("  所有内层归档与既有包完全一致")
+
+    # ── 升级报告 ────────────────────────────────────────────────
+    report = render_upgrade_report(
+        package_name=cfg.package_name,
+        package_version=cfg.package_version,
+        previous_version=previous.name if previous else "",
+        arch=arch,
+        package_sha256=result.sha256,
+        package_size=result.size,
+        baseline_glibc=cfg.glibc_max,
+        components=infos,
+        gate_summary=gate_summary or "本次未执行",
+        verified_targets=verified,
+        duration_s=int(time.time() - started) if started else None,
+    )
+    report_path = ws.dist / arch / f"REPORT-{cfg.package_version}-{arch}.md"
+    report_path.write_text(report, encoding="utf-8")
+    log(f"  构建报告: {report_path}")
+
+    log("")
+    log(f"安装包: {result.path}")
+    log(f"SHA-256: {result.sha256}")
     return 0
+
+
+def _find_previous_package(ws: Workspace, arch: str, exclude: str = "") -> Path | None:
+    """找出用于对照的既有包。
+
+    以基准包来源为准 —— 那才是现场正在使用的上一个正式版本。dist 下的
+    产物可能是同一版本的重复构建，拿它对照会得出"无变化"的空结论。
+    """
+    manifest = ws.arch_base(arch) / "import-manifest.json"
+    if manifest.exists():
+        try:
+            name = json.loads(manifest.read_text(encoding="utf-8")).get("source_package")
+        except (OSError, json.JSONDecodeError):
+            name = None
+        if name:
+            for root in (Path("/root/sprixinSoft_v13"), ws.root, ws.dist / arch):
+                p = root / name
+                if p.exists():
+                    return p
+
+    # 退而求其次：dist 下最近一次的产物，但要排除本次即将覆盖的同名文件
+    candidates = sorted(
+        (p for p in (ws.dist / arch).glob("*.tar.gz")
+         if p.is_file() and p.name != exclude),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _load_verified_targets(ws: Workspace, arch: str) -> list[tuple[str, str, bool]]:
+    """读取目标系统验证结果（由 compat/verify-all.sh 产生）。"""
+    path = ws.root / "verify-results" / f"{arch}.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [(d.get("os", "?"), d.get("glibc", "?"), bool(d.get("passed"))) for d in data]
+
+
+def cmd_package(args, cfg: Config, ws: Workspace) -> int:
+    return do_package(args, cfg, ws, arch=args.arch)
 
 
 def cmd_gate(args, cfg: Config, ws: Workspace) -> int:
@@ -364,6 +606,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep-sysroot", action="store_true", help="复用上次的 sysroot")
     p.add_argument("--no-package", action="store_true")
     p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("package", help="组装安装包（不重新编译）")
+    p.add_argument("--arch", required=True)
+    p.set_defaults(func=cmd_package)
 
     p = sub.add_parser("gate", help="单独执行 ABI 门禁")
     p.add_argument("--arch", default="x86_64")

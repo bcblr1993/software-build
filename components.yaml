@@ -136,14 +136,6 @@ components:
       aarch64: https://dl.influxdata.com/influxdb/releases/influxdb-{version}_linux_arm64.tar.gz
     sha256: LOCK
 
-  chronograf:
-    build: repack
-    version: "1.10.1"
-    url_per_arch:
-      x86_64: https://dl.influxdata.com/chronograf/releases/chronograf-{version}_linux_amd64.tar.gz
-      aarch64: https://dl.influxdata.com/chronograf/releases/chronograf-{version}_linux_arm64.tar.gz
-    sha256: LOCK
-
   jdk:
     build: repack
     # JDK 为二进制发行版，x86 与 ARM 版本号不同源，分别指定
@@ -153,6 +145,12 @@ components:
     local_only: true
     note: 上游需授权下载，从 cache/ 提供本地归档
 
+# 基准包中存在但不再随包发布的组件。
+# 打包时跳过，相关的启停、自检与日志逻辑也一并移除。
+excluded_components:
+  # 现场未使用，移除以缩减包体积与攻击面
+  - chronograf
+
 # 安装包内的静态文件，来自 overlay/，打包时原样复制。
 # install.sh / startup.sh / shutdown.sh 的行为必须与现有包保持一致。
 overlay_files:
@@ -160,4 +158,5 @@ overlay_files:
   - startup.sh
   - shutdown.sh
   - verify.sh
+  - logs.sh
   - KEEPALIVED-USAGE.md

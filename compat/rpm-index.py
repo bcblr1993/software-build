@@ -7,7 +7,7 @@ glib2 包里，libsqlite3.so.0 在 sqlite-libs 包里，liblzma.so.5 在 xz-libs
 每个包的 provides（含 so 名），直接读它即可，无需逐个解开 rpm。
 
 用法:
-    rpm-index.py <ISO 挂载点> <所需 so 名>...
+    rpm-index.py <ISO 挂载点> [--arch <架构>] <所需 so 名>...
 输出:
     每行 "<so 名> <rpm 相对路径>"，未找到的 so 不输出。
 """
@@ -37,9 +37,15 @@ def _open_maybe_compressed(path: Path):
     return path.open("rb")
 
 
-def build_index(mount: Path) -> dict[str, str]:
-    """返回 {so 名: rpm 相对路径}。"""
+def build_index(mount: Path, arch: str = "") -> dict[str, str]:
+    """返回 {so 名: rpm 相对路径}。
+
+    arch 非空时只收录该架构与 noarch 的包。安装盘常同时收录 i686 与
+    x86_64 两套包，二者提供同名的 .so —— 若不加过滤，可能给 x86_64 的
+    rootfs 补进 32 位库，装上也用不了。
+    """
     index: dict[str, str] = {}
+    suffixes = (f".{arch}.rpm", ".noarch.rpm") if arch else ()
 
     # 一张盘可能有多个仓库（Anolis 8 分 BaseOS 与 AppStream）
     primaries = sorted(mount.rglob("repodata/*primary.xml*"))
@@ -76,7 +82,7 @@ def build_index(mount: Path) -> dict[str, str]:
                                     if m:
                                         provides.append(m.group(1))
 
-                    if href:
+                    if href and (not suffixes or href.endswith(suffixes)):
                         rel = str((repo_root / href).relative_to(mount))
                         for so in provides:
                             # 同一个 so 可能被多个包提供，先到先得即可
@@ -94,9 +100,15 @@ def main() -> int:
         return 2
 
     mount = Path(sys.argv[1])
-    wanted = sys.argv[2:]
+    args = sys.argv[2:]
 
-    index = build_index(mount)
+    arch = ""
+    if len(args) >= 2 and args[0] == "--arch":
+        arch = args[1]
+        args = args[2:]
+    wanted = args
+
+    index = build_index(mount, arch)
     if not index:
         print("未能从 repodata 建立索引", file=sys.stderr)
         return 1

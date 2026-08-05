@@ -66,6 +66,13 @@ WANTED=(
   filesystem setup basesystem
   libgcc gmp libffi p11-kit-trust ca-certificates
   net-tools iproute
+  # 端到端验证需要走完现场流程：解压安装包、查进程、探端口、做健康检查，
+  # 因此这些工具必须齐备，静态探测所需的最小集合是不够的
+  tar gzip xz bzip2
+  procps-ng psmisc
+  curl libcurl
+  hostname util-linux shadow-utils
+  which diffutils
   # 各发行版对 attr/acl 的拆包方式不同：CentOS 7 提供 libattr / libacl，
   # openEuler 系（凝思、麒麟信安）把 .so 放在 attr / acl 包中。两种都取。
   attr acl libattr libacl
@@ -164,7 +171,7 @@ resolve_deps() {
         "cd /work/rootfs && rpm2cpio /work/rpms/$(basename "$rpm") | cpio -idmu --quiet 2>/dev/null || true"
       echo "    $so ← $(basename "$rpm")"
       added=$((added + 1))
-    done < <(python3 "$(dirname "$0")/rpm-index.py" "$MNT" $missing 2>/dev/null)
+    done < <(python3 "$(dirname "$0")/rpm-index.py" "$MNT" --arch "$ARCH" $missing 2>/dev/null)
 
     [ "$added" -eq 0 ] && { echo "  仍有缺失且 repodata 中无提供者:$missing"; return 1; }
   done

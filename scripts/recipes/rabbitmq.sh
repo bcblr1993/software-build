@@ -112,16 +112,23 @@ ERTS_INCLUDE="$ERTS_DIR/include"
 CFLAGS_COMMON="-O2 -fPIC -I$ERTS_INCLUDE -I$SYSROOT/include -I$c_src"
 LDFLAGS_COMMON="-shared -L$SYSROOT/lib -Wl,-rpath,\$ORIGIN"
 
-# crypto.so：主 NIF，链接 libcrypto
+# crypto.so：主 NIF，链接 libcrypto。
+#
+# crypto_callback.c 必须一并编入，不能只单独产出 crypto_callback.so ——
+# OTP 仅在定义 DYNAMIC_CRYPTO_LIB 时才把回调分离为独立库，默认构建中
+# get_crypto_callbacks 是静态链入 crypto.so 的。漏掉它，crypto.so 会因
+# `undefined symbol: get_crypto_callbacks` 而无法加载，Erlang 随即报
+# crypto:strong_rand_bytes/1 未定义，RabbitMQ 启动崩溃 —— 与修复前的
+# 现象完全一致，极易被误判为修复无效。
 mapfile -t crypto_sources < <(find "$c_src" -maxdepth 1 -name '*.c' \
-  ! -name 'crypto_callback.c' ! -name 'otp_test_engine.c' | sort)
+  ! -name 'otp_test_engine.c' | sort)
 
 gcc $CFLAGS_COMMON -o "$nif_out/crypto.so" "${crypto_sources[@]}" \
   $LDFLAGS_COMMON -lcrypto
 
-# crypto_callback.so：不链接 libcrypto，仅提供回调
+# crypto_callback.so：保留一份独立库，与上游产物结构一致
 gcc $CFLAGS_COMMON -o "$nif_out/crypto_callback.so" "$c_src/crypto_callback.c" \
-  $LDFLAGS_COMMON
+  $LDFLAGS_COMMON -lcrypto
 
 # otp_test_engine.so：测试用 engine，缺失会导致部分自检失败
 if [ -f "$c_src/otp_test_engine.c" ]; then

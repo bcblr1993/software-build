@@ -103,6 +103,7 @@ class Config:
     vendored_libs: dict[str, VendoredLib]
     components: dict[str, Component]
     overlay_files: list[str]
+    excluded_components: list[str]
     source_path: Path
 
     # ── 读取 ────────────────────────────────────────────────────────
@@ -170,6 +171,7 @@ class Config:
             vendored_libs=libs,
             components=comps,
             overlay_files=list(raw.get("overlay_files") or []),
+            excluded_components=list(raw.get("excluded_components") or []),
             source_path=path,
         )
         cfg.validate()

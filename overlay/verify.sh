@@ -17,9 +17,9 @@ ERTS_DIR="$(find "$BASE_DIR/rabbitmq/lib" -maxdepth 1 -type d -name 'erts-*' 2>/
 export JAVA_HOME="$BASE_DIR/jdk"
 export PATH="$JAVA_HOME/bin${ERTS_DIR:+:$ERTS_DIR/bin}:$PATH"
 
-# 各组件二进制已内置 $ORIGIN/../lib 的 rpath，无需 LD_LIBRARY_PATH。
-# 此处仍保留，是为了兼容以旧方式构建的历史安装包。
-export LD_LIBRARY_PATH="$BASE_DIR/nginx/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# 不导出 LD_LIBRARY_PATH：它会被 curl 等系统命令继承，迫使它们加载
+# 随包的 OpenSSL 而崩溃（symbol ... not defined in file libssl.so.1.1）。
+# 各组件二进制已内置 $ORIGIN/../lib 的 rpath，可自行定位随包库。
 
 fail=0
 tmp="/tmp/sprixin-verify.$$"
@@ -101,6 +101,30 @@ echo "base: $BASE_DIR"
 echo "system: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") / glibc $(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
 echo
 
+echo "── 安装目录可达性 ──"
+# nginx 的 worker 以 nobody 身份运行，路径上任何一级缺少其他用户的执行
+# 权限，都会让静态文件返回 403 —— 而 nginx 自身启动正常、端口也在监听，
+# 排查时极易被误判为配置问题。此处提前指出。
+unreachable=""
+probe="$BASE_DIR"
+while [ "$probe" != "/" ] && [ -n "$probe" ]; do
+  perms="$(stat -c %a "$probe" 2>/dev/null)"
+  case "$perms" in
+    *[1357]) ;;                      # 其他用户有执行位
+    "") ;;
+    *) unreachable="$probe ($perms) $unreachable" ;;
+  esac
+  probe="$(dirname "$probe")"
+done
+if [ -n "$unreachable" ]; then
+  echo "[WARN] 以下目录缺少其他用户的执行权限，nginx worker(nobody) 可能无法读取静态文件："
+  for d in $unreachable; do echo "    $d"; done
+  echo "    如访问返回 403，可执行: chmod o+x <上述目录>"
+else
+  pass "安装路径对 nginx worker 可达"
+fi
+
+echo
 echo "── 依赖完整性 ──"
 check_deps "redis 依赖"      "redis/bin/redis-server"
 check_deps "nginx 依赖"      "nginx/sbin/nginx"
@@ -120,7 +144,6 @@ check_version "redis"      "v=${REDIS_VERSION:-8.}"        redis/bin/redis-serve
 check_version "nginx"      "nginx/${NGINX_VERSION:-1.}"    nginx/sbin/nginx -v
 check_version "keepalived" "v${KEEPALIVED_VERSION:-2.}"    keepalived/sbin/keepalived --version
 [ -n "$ERTS_DIR" ] && check_version "rabbitmq" "${RABBITMQ_VERSION:-4.}" rabbitmq/sbin/rabbitmqctl version
-check_cmd "chronograf 可执行" chronograf/usr/bin/chronograf --version
 
 echo
 echo "── 运行时（需服务已启动）──"
@@ -134,14 +157,12 @@ else
   check_port "influxdb" 8086
   check_port "rabbitmq-amqp" 5672
   check_port "rabbitmq-management" 15672
-  check_port "chronograf" 9908
 
   check_cmd "redis ping" redis/bin/redis-cli -h 127.0.0.1 -p 6379 -a "$redis_pass" --no-auth-warning ping
   check_cmd "nginx http" curl -fsS -m 5 http://127.0.0.1:9000/
   check_cmd "nacos readiness" curl -fsS -m 10 http://127.0.0.1:8848/nacos/v1/console/health/readiness
   check_cmd "influxdb ping" curl -fsS -m 5 http://127.0.0.1:8086/ping
   check_cmd "rabbitmq status" rabbitmq/sbin/rabbitmqctl status
-  check_cmd "chronograf http" curl -fsS -m 5 http://127.0.0.1:9908/
 fi
 
 rm -f "$tmp"
