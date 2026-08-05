@@ -31,38 +31,102 @@
 ## 项目结构
 
 ```
-components.yaml       组件清单，唯一事实来源。升级即改此处版本号
+components.yaml          组件清单，唯一事实来源。升级即改此处版本号
 scripts/
-  build.sh            构建入口，CLI 与 Web 共用同一引擎
-  lib/abi-gate.sh     ABI 门禁，兼容性的强制校验
-  lib/secrets-scan.sh 敏感信息扫描，pre-commit 调用
-  recipes/            各组件编译配方
-baseline/             基线镜像定义（glibc 2.17，双架构）
-overlay/              包内静态文件（install.sh / startup.sh 等）
-compat/               目标系统验证容器：从 ISO 铺 rootfs，免装机验证
-web/                  可视化构建控制台（TOTP 认证）
-docs/                 设计说明与运行手册
+  build.py               构建入口，CLI 与控制台共用同一引擎
+  sprixin_build/         构建引擎：清单解析、容器编排、打包、发布、容量探测
+  lib/abi-gate.sh        ABI 门禁，兼容性的强制校验
+  lib/secrets-scan.sh    敏感信息扫描，pre-commit 调用
+  recipes/               各组件编译配方
+baseline/                基线镜像定义（glibc 2.17，双架构）
+overlay/                 包内脚本（install / startup / shutdown / verify / logs）
+compat/
+  build-rootfs.sh        从 ISO 构建验证容器，支持 RPM 与 Debian 两系
+  e2e-test.sh            完整安装启动验证，默认以普通用户执行
+  build-all.sh           并行重建全部验证容器
+web/                     构建控制台（TOTP 认证，标准库实现）
+docs/                    设计说明与运维手册
 ```
+
+## 已验证的目标系统
+
+验证容器全部从各系统的安装 ISO 直接构建，不经装机：
+
+| 系统 | 架构 | glibc | 包格式 |
+|---|---|---|---|
+| 凝思 LinxOS 6.0.80 | x86_64 | 2.19 | deb (jessie) |
+| 凝思 LinxOS 6.0.99 (EL20.03 / SP3) | x86_64 / aarch64 | 2.28 | rpm |
+| 凝思 LinxOS 6.0.99 (EL22.03) | aarch64 | 2.34 | rpm |
+| 凝思 LinxOS 6.0.100 | aarch64 | 2.28 | deb (buster) |
+| 麒麟信安 KylinSec 3.3 / 3.4 / 3.5.2 | x86_64 / aarch64 | 2.17 – 2.34 | rpm |
+| 麒麟 Kylin V10 SP2 | aarch64 | 2.28 | rpm |
+| CentOS 7.9 | x86_64 | 2.17 | rpm |
+| Anolis OS 8.6 | x86_64 | 2.28 | rpm |
+
+新增系统只需把 ISO 放入镜像池，脚本会自动判定架构与包格式、解出最小
+rootfs，并按包索引反查补齐依赖直到闭合。
 
 ## 快速开始
 
-```bash
-git config core.hooksPath .githooks   # 启用敏感信息预提交检查
-make baseline                          # 构建双架构基线镜像
-make build                             # 按 components.yaml 构建全部架构
-make verify                            # 在目标系统容器内验证
-```
-
-升级某个组件，只需修改 `components.yaml`：
+升级某个组件，只需修改 `components.yaml` 中的版本号与校验和：
 
 ```yaml
 components:
   nginx:
     version: "1.33.0"
-    sha256: <上游校验和>
+    sha256: <上游发布页给出的校验和>
 ```
 
-然后重新构建。产物、校验和、升级报告与验证证据会自动生成。
+然后一条命令走完全程：
+
+```bash
+python3 scripts/build.py all
+```
+
+双架构编译 → ABI 门禁 → 打包 → 在全部目标系统容器中安装并启动验证。
+任一阶段失败即中止，不会带着问题继续往下走。
+
+也可以分步执行，便于排查：
+
+```bash
+python3 scripts/build.py build   --arch x86_64   # 只编译
+python3 scripts/build.py package --arch x86_64   # 只打包
+bash compat/e2e-test.sh dist/x86_64/<包名>.tar.gz # 只验证
+bash compat/build-all.sh                          # 重建全部验证容器
+```
+
+## 构建控制台
+
+```bash
+python3 web/server.py --port 8899
+```
+
+首次访问引导绑定动态验证码（TOTP），此后凭验证码登录。页面上可以：
+
+- 编辑组件版本，一键触发全流程构建，实时查看日志
+- 上传自备组件（nacos、influxdb 等无需编译者），打包时优先采用
+- 将验证通过的产物发布为正式版本，自动生成发布说明与变更记录
+- 清理候选产物；正式版本受保护，不可删除
+
+并发度可选自动、串行或指定数值，自动模式按机器的核数、内存与磁盘给出建议。
+
+## 构建产物与正式版本
+
+构建通过不等于可以发布 —— 产物还需在实机上验证。二者分开存放：
+
+```
+dist/<arch>/       候选产物，可随时清理
+releases/<版本>/   正式版本，一经发布不可删除
+```
+
+发布是一次显式操作，要求填写实机测试说明，并自动生成：
+
+- `RELEASE-NOTES-<版本>-<架构>.md` —— 校验和、组件清单、相对上一正式版本的
+  变更、兼容性说明、验证结果、安装步骤
+- `CHANGELOG.md` —— 累积的变更记录
+
+正式版本以只读加 immutable 属性保存。仅去写权限是不够的：Linux 判断能否
+删除文件看的是父目录写权限，而 root 绕过全部权限检查。
 
 ## 安装包结构
 

@@ -78,6 +78,28 @@ for idx in 1 2 3 4 5; do
   fi
 done
 
+# rabbitmq 同理。startup.sh 给 rabbitmq-plugins 的超时是 30 秒 —— 真实
+# 机器上绰绰有余，但 QEMU 下仅启动 Erlang 虚拟机就可能超过它，导致插件
+# 启用被中断、服务随之启动失败。此处以宽松超时重试一次，确认产物本身没有
+# 问题；真实 ARM 机器上不会走到这一步。
+if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":5672\b"; then
+  ERTS_DIR="$(find "$PWD/rabbitmq/lib" -maxdepth 1 -type d -name 'erts-*' | sort | tail -1)"
+  if [ -n "$ERTS_DIR" ]; then
+    echo
+    echo "rabbitmq 未就绪，以宽松超时重试（模拟环境下 Erlang 启动较慢）"
+    export PATH="$ERTS_DIR/bin:$PATH"
+    timeout 300 ./rabbitmq/sbin/rabbitmq-plugins enable rabbitmq_management >/dev/null 2>&1
+    ./rabbitmq/sbin/rabbitmq-server -detached >/dev/null 2>&1
+    for i in $(seq 1 30); do
+      sleep 10
+      if (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":5672\b"; then
+        echo "  已就绪，额外用时 $((i * 10)) 秒"
+        break
+      fi
+    done
+  fi
+fi
+
 # QEMU 模拟下 JVM 启动可比原生慢一个数量级，nacos 常在 startup.sh 的
 # 120 秒窗口内来不及监听端口。此处按实际情况再等，避免把"慢"误判成"坏"。
 if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"; then
