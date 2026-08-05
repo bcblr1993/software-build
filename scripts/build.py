@@ -529,6 +529,100 @@ def cmd_package(args, cfg: Config, ws: Workspace) -> int:
     return do_package(args, cfg, ws, arch=args.arch)
 
 
+def cmd_all(args, cfg: Config, ws: Workspace) -> int:
+    """一键完成全部工作：双架构编译、打包，并在全部目标系统上验证。
+
+    这是日常使用的入口 —— 升级组件后只需执行本命令，无需再逐个架构、
+    逐个步骤地敲命令。任一阶段失败即中止，不会带着问题继续往下走。
+    """
+    started = time.time()
+    archs = args.arch.split(",") if args.arch else list(cfg.architectures)
+    archs = [a.strip() for a in archs if a.strip()]
+
+    log("")
+    log("╔" + "═" * 66 + "╗")
+    log(f"  {cfg.package_name} {cfg.package_version} 全流程构建")
+    log(f"  架构：{'、'.join(archs)}    基线 glibc：{cfg.glibc_max}")
+    log("╚" + "═" * 66 + "╝")
+
+    results: dict[str, str] = {}
+
+    # ── 逐架构：编译 → 门禁 → 打包 ──────────────────────────────
+    for arch in archs:
+        log("")
+        log("█" * 68)
+        log(f"█  {arch}")
+        log("█" * 68)
+
+        build_args = argparse.Namespace(
+            arch=arch,
+            component=None,
+            keep_sysroot=args.keep_sysroot,
+            no_package=True,
+        )
+        rc = cmd_build(build_args, cfg, ws)
+        if rc != 0:
+            results[arch] = "编译或门禁未通过"
+            log(f"\n{arch} 编译阶段失败，中止")
+            return _summary(results, archs, started, failed=True)
+
+        rc = do_package(args, cfg, ws, arch=arch, gate_summary="已通过", started=started)
+        if rc != 0:
+            results[arch] = "打包失败"
+            log(f"\n{arch} 打包阶段失败，中止")
+            return _summary(results, archs, started, failed=True)
+
+        results[arch] = "已产出"
+
+    # ── 全目标系统验证 ──────────────────────────────────────────
+    if args.no_verify:
+        log("\n按要求跳过目标系统验证")
+        return _summary(results, archs, started, failed=False)
+
+    import subprocess
+
+    verify_failed = False
+    for arch in archs:
+        pkgs = sorted(
+            (ws.dist / arch).glob("*.tar.gz"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not pkgs:
+            continue
+
+        log("")
+        log("█" * 68)
+        log(f"█  目标系统验证：{arch}")
+        log("█" * 68)
+
+        proc = subprocess.run(
+            ["bash", str(REPO_ROOT / "compat" / "e2e-test.sh"), str(pkgs[0])],
+            cwd=str(REPO_ROOT),
+        )
+        if proc.returncode != 0:
+            results[arch] += "，但目标系统验证未全部通过"
+            verify_failed = True
+        else:
+            results[arch] += "，全部目标系统验证通过"
+
+    return _summary(results, archs, started, failed=verify_failed)
+
+
+def _summary(results: dict[str, str], archs: list[str], started: float, failed: bool) -> int:
+    elapsed = int(time.time() - started)
+    log("")
+    log("╔" + "═" * 66 + "╗")
+    log("  构建总结")
+    log("╚" + "═" * 66 + "╝")
+    for arch in archs:
+        log(f"  {arch:<10} {results.get(arch, '未执行')}")
+    log(f"  用时 {elapsed // 60} 分 {elapsed % 60} 秒")
+    log("")
+    log("  产物未通过验证，请勿交付" if failed else "  全部完成，产物可交付")
+    return 1 if failed else 0
+
+
 def cmd_gate(args, cfg: Config, ws: Workspace) -> int:
     target = Path(args.path) if args.path else ws.arch_out(args.arch)
     gate_script = REPO_ROOT / "scripts" / "lib" / "abi-gate.sh"
@@ -606,6 +700,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep-sysroot", action="store_true", help="复用上次的 sysroot")
     p.add_argument("--no-package", action="store_true")
     p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("all", help="一键完成：双架构编译、打包、全目标系统验证")
+    p.add_argument("--arch", default="", help="限定架构，逗号分隔；缺省为清单中的全部")
+    p.add_argument("--keep-sysroot", action="store_true", help="复用上次的 sysroot")
+    p.add_argument("--no-verify", action="store_true", help="只出包，跳过目标系统验证")
+    p.set_defaults(func=cmd_all)
 
     p = sub.add_parser("package", help="组装安装包（不重新编译）")
     p.add_argument("--arch", required=True)

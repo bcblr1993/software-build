@@ -102,7 +102,7 @@ class BuildRunner:
             package  组装安装包（不重新编译）
             verify   在全部目标系统容器中完整安装并启动
         """
-        if action not in ("build", "package", "verify"):
+        if action not in ("all", "build", "package", "verify"):
             return False, f"未知的操作: {action}"
 
         with self._lock:
@@ -122,7 +122,12 @@ class BuildRunner:
             args=(action, arch, components, operator, parallel),
             daemon=True,
         ).start()
-        return True, {"build": "构建已启动", "package": "打包已启动", "verify": "验证已启动"}[action]
+        return True, {
+            "all": "全流程已启动",
+            "build": "构建已启动",
+            "package": "打包已启动",
+            "verify": "验证已启动",
+        }[action]
 
     def _build_command(self, action: str, arch: str, components: list[str]) -> list[str]:
         if action == "verify":
@@ -138,8 +143,10 @@ class BuildRunner:
             str(self.repo_root / "scripts" / "build.py"),
             "--workspace", str(self.workspace),
             action,
-            "--arch", arch,
         ]
+        # all 不限定架构时构建清单中的全部，这正是"一键出全部包"的用法
+        if action != "all" or arch not in ("", "all"):
+            cmd += ["--arch", arch]
         if action == "build":
             for c in components:
                 cmd += ["--component", c]

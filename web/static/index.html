@@ -145,10 +145,12 @@
 
   <div class="card">
     <h2>构建</h2>
-    <p class="sub">修改版本号后保存，再选择架构触发构建。产物、校验和与验证结果自动入库。</p>
+    <p class="sub">改完版本号点「一键构建全部」即可：双架构编译、ABI 门禁、打包、
+      并在全部目标系统容器中安装启动验证，一次做完。产物、校验和与验证结果自动入库。</p>
     <div class="row">
-      <label class="row" style="gap:6px"><input type="radio" name="arch" value="x86_64" checked> x86_64</label>
-      <label class="row" style="gap:6px"><input type="radio" name="arch" value="aarch64"> aarch64</label>
+      <label class="row" style="gap:6px"><input type="radio" name="arch" value="all" checked> 全部架构</label>
+      <label class="row" style="gap:6px"><input type="radio" name="arch" value="x86_64"> 仅 x86_64</label>
+      <label class="row" style="gap:6px"><input type="radio" name="arch" value="aarch64"> 仅 aarch64</label>
       <span style="color:var(--muted);font-size:13px;margin-left:8px">并发</span>
       <select id="parallel">
         <option value="auto">自动</option>
@@ -158,9 +160,10 @@
         <option value="8">8</option>
       </select>
       <span style="flex:1"></span>
+      <button id="build-btn">仅编译</button>
       <button id="package-btn">仅打包</button>
-      <button id="verify-btn">目标系统验证</button>
-      <button class="primary" id="build-btn">开始构建</button>
+      <button id="verify-btn">仅验证</button>
+      <button class="primary" id="all-btn">一键构建全部</button>
     </div>
     <p class="note" id="capacity-note" style="margin:10px 0 0"></p>
     <div id="log" style="margin-top:16px">等待构建…</div>
@@ -268,7 +271,7 @@ $('#save-btn').onclick = async () => {
 
 let es = null;
 function enableActions() {
-  ['#build-btn', '#package-btn', '#verify-btn'].forEach(b => {
+  ['#all-btn', '#build-btn', '#package-btn', '#verify-btn'].forEach(b => {
     const el = $(b); if (el) el.disabled = false;
   });
 }
@@ -307,11 +310,11 @@ function appendLog(line, cls) {
   el.scrollTop = el.scrollHeight;
 }
 
-const ACTION_LABEL = {build: '构建', package: '打包', verify: '目标系统验证'};
+const ACTION_LABEL = {all: '全流程构建', build: '编译', package: '打包', verify: '目标系统验证'};
 
 async function runAction(action) {
   const arch = document.querySelector('input[name=arch]:checked').value;
-  const btns = ['#build-btn', '#package-btn', '#verify-btn'];
+  const btns = ['#all-btn', '#build-btn', '#package-btn', '#verify-btn'];
   btns.forEach(b => $(b).disabled = true);
 
   const parallel = $('#parallel').value;
@@ -329,6 +332,7 @@ async function runAction(action) {
   attachLog();
 }
 
+$('#all-btn').onclick     = () => runAction('all');
 $('#build-btn').onclick   = () => runAction('build');
 $('#package-btn').onclick = () => runAction('package');
 $('#verify-btn').onclick  = () => runAction('verify');
