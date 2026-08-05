@@ -40,6 +40,10 @@
   th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--line); }
   td { padding: 8px 10px; border-bottom: 1px solid var(--line); }
   tr:last-child td { border-bottom: none; }
+  select {
+    font: inherit; padding: 6px 10px; border: 1px solid var(--line);
+    border-radius: 6px; background: #fff; color: var(--text);
+  }
   input[type=text], input[type=password] {
     font: inherit; padding: 6px 10px; border: 1px solid var(--line);
     border-radius: 6px; background: #fff; color: var(--text); width: 100%;
@@ -145,11 +149,20 @@
     <div class="row">
       <label class="row" style="gap:6px"><input type="radio" name="arch" value="x86_64" checked> x86_64</label>
       <label class="row" style="gap:6px"><input type="radio" name="arch" value="aarch64"> aarch64</label>
+      <span style="color:var(--muted);font-size:13px;margin-left:8px">并发</span>
+      <select id="parallel">
+        <option value="auto">自动</option>
+        <option value="serial">串行（便于排错）</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+        <option value="8">8</option>
+      </select>
       <span style="flex:1"></span>
       <button id="package-btn">仅打包</button>
       <button id="verify-btn">目标系统验证</button>
       <button class="primary" id="build-btn">开始构建</button>
     </div>
+    <p class="note" id="capacity-note" style="margin:10px 0 0"></p>
     <div id="log" style="margin-top:16px">等待构建…</div>
   </div>
 
@@ -182,6 +195,7 @@ async function refreshStatus() {
     $('#busy-state').textContent = data.busy ? '构建进行中' : '';
     loadComponents();
     loadHistory();
+    loadCapacity();
     if (data.busy) attachLog();
   } else {
     $('#gate').classList.remove('hide');
@@ -300,9 +314,10 @@ async function runAction(action) {
   const btns = ['#build-btn', '#package-btn', '#verify-btn'];
   btns.forEach(b => $(b).disabled = true);
 
+  const parallel = $('#parallel').value;
   const {ok, data} = await api('/api/build', {
     method: 'POST',
-    body: JSON.stringify({arch, action, components: []})
+    body: JSON.stringify({arch, action, parallel, components: []})
   });
 
   if (!ok) {
@@ -317,6 +332,16 @@ async function runAction(action) {
 $('#build-btn').onclick   = () => runAction('build');
 $('#package-btn').onclick = () => runAction('package');
 $('#verify-btn').onclick  = () => runAction('verify');
+
+async function loadCapacity() {
+  const {ok, data} = await api('/api/capacity');
+  if (!ok) return;
+  const s = data.suggest || {};
+  $('#capacity-note').textContent =
+    `构建机 ${data.cores} 核 · 内存 ${data.mem_available_gb}/${data.mem_total_gb} GB 可用 · ` +
+    `磁盘 ${data.disk_free_gb} GB · 负载 ${data.load1} — ` +
+    `自动模式下构建并发 ${s.build}、验证并发 ${s.verify}`;
+}
 
 async function loadHistory() {
   const {ok, data} = await api('/api/history');

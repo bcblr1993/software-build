@@ -163,21 +163,78 @@ if [ -n "$ONLY_IMAGE" ]; then
   exit $?
 fi
 
-total=0
-failed=0
+# ── 并行执行 ────────────────────────────────────────────────────────
+#
+# 各目标系统之间彼此独立，没有任何共享状态：工作目录、包副本、容器
+# 都是每次调用现开的。串行跑完十来个系统要一个多小时，而构建机是
+# 160 核 / 377G，串行时几乎闲置。
+#
+# 并发度默认取 CPU 核数的 1/8 且不超过 8：每个实例要跑起 nacos(512M 堆)、
+# rabbitmq(Erlang) 等五个服务，真正的约束是内存与端口争用而非 CPU。
+# 容器各有独立网络命名空间，端口不冲突。
+# 并发度：auto 按机器容量自动判定，serial 或 1 为串行，也可直接给数字。
+# 判定依据见 scripts/sprixin_build/capacity.py —— 端到端验证的硬约束是内存
+# （每实例约 2GB），不是 CPU。
+PARALLEL="$(PYTHONPATH="$(dirname "$0")/../scripts" python3 -m sprixin_build.capacity \
+             --for verify --path /root/sprixin-build 2>/dev/null \
+             || echo 1)"
+if [ -n "${SPRIXIN_PARALLEL:-}" ]; then
+  PARALLEL="$(PYTHONPATH="$(dirname "$0")/../scripts" python3 -c "
+import sys; sys.path.insert(0,'$(dirname "$0")/../scripts')
+from sprixin_build.capacity import resolve
+print(resolve('${SPRIXIN_PARALLEL}', 'verify', '/root/sprixin-build'))" 2>/dev/null || echo 1)"
+fi
+
+images=()
 while IFS= read -r image; do
   case "$image" in
     *aarch64*|*arm64*) img_arch=aarch64 ;;
     *) img_arch=x86_64 ;;
   esac
   [ "$img_arch" = "$PKG_ARCH" ] || continue
-
-  total=$((total + 1))
-  run_in "$image" || failed=$((failed + 1))
+  images+=("$image")
 done < <(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^sprixin-compat:' | sort)
+
+total=${#images[@]}
+[ "$total" -gt 0 ] || { echo "没有与该架构匹配的验证容器" >&2; exit 1; }
+
+echo " 并发度：$PARALLEL   目标系统：$total 个"
+
+logdir="$(mktemp -d /tmp/e2elogs.XXXXXX)"
+pids=()
+running=0
+
+for image in "${images[@]}"; do
+  tag="${image#sprixin-compat:}"
+  # 并行时输出会交错，故各写各的日志，结束后按顺序汇总
+  ( run_in "$image" > "$logdir/$tag.log" 2>&1; echo $? > "$logdir/$tag.rc" ) &
+  pids+=($!)
+  running=$((running + 1))
+
+  if [ "$running" -ge "$PARALLEL" ]; then
+    wait -n 2>/dev/null || wait "${pids[0]}" 2>/dev/null
+    running=$((running - 1))
+  fi
+done
+wait
+
+failed=0
+for image in "${images[@]}"; do
+  tag="${image#sprixin-compat:}"
+  cat "$logdir/$tag.log" 2>/dev/null
+  rc="$(cat "$logdir/$tag.rc" 2>/dev/null || echo 1)"
+  [ "$rc" = "0" ] || failed=$((failed + 1))
+done
 
 echo
 echo "════════════════════════════════════════════════════════════════════"
 echo " 端到端验证完成：共 $total 个目标系统，失败 $failed 个"
+for image in "${images[@]}"; do
+  tag="${image#sprixin-compat:}"
+  rc="$(cat "$logdir/$tag.rc" 2>/dev/null || echo 1)"
+  printf ' %-6s %s\n' "$([ "$rc" = 0 ] && echo '[通过]' || echo '[失败]')" "$tag"
+done
 echo "════════════════════════════════════════════════════════════════════"
+
+rm -rf "$logdir"
 [ "$failed" -eq 0 ]

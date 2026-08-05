@@ -125,6 +125,23 @@ else
 fi
 
 echo
+echo "── 系统前置依赖 ──"
+# nacos 的 JRaft 依赖 RocksDB，其 JNI 原生库从 jar 解压到临时目录后加载，
+# 无法为其设置 rpath，只能由系统提供 C++ 运行时。系统若为最小化安装而
+# 缺少它，nacos 会在 RocksDBLogStorage 静态初始化时失败，表现为端口
+# 始终不监听、日志里是一长串 Spring 构造异常，很难一眼看出根因。
+found_cxx=""
+for d in /lib64 /usr/lib64 /lib /usr/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
+  [ -e "$d/libstdc++.so.6" ] && { found_cxx="$d/libstdc++.so.6"; break; }
+done
+if [ -n "$found_cxx" ]; then
+  pass "系统 C++ 运行时 ($found_cxx)"
+else
+  bad "系统缺少 libstdc++.so.6 —— nacos 将无法启动"
+  echo "    请安装：yum install -y libstdc++   （或 apt install libstdc++6）"
+fi
+
+echo
 echo "── 依赖完整性 ──"
 check_deps "redis 依赖"      "redis/bin/redis-server"
 check_deps "nginx 依赖"      "nginx/sbin/nginx"

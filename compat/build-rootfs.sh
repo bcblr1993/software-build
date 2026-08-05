@@ -68,6 +68,10 @@ WANTED=(
   # 而 verify.sh 用 awk 从 redis.conf 中取 requirepass
   libsigsegv readline mpfr
   zlib openssl-libs
+  # nacos 的 JRaft 依赖 RocksDB，其 JNI 原生库从 jar 解压到临时目录后加载，
+  # 无法为它设置 rpath，只能由系统提供 C++ 运行时。缺失时 nacos 会在
+  # RocksDBLogStorage 的静态初始化阶段失败，表现为端口始终不监听。
+  libstdc++ libgcc
   filesystem setup basesystem
   libgcc gmp libffi p11-kit-trust ca-certificates
   net-tools iproute

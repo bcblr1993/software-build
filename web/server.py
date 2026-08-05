@@ -93,6 +93,7 @@ class BuildRunner:
         components: list[str],
         operator: str,
         action: str = "build",
+        parallel: str = "auto",
     ) -> tuple[bool, str]:
         """启动一项任务。
 
@@ -113,10 +114,13 @@ class BuildRunner:
                 "arch": arch,
                 "components": components,
                 "operator": operator,
+                "parallel": parallel,
                 "started_at": time.time(),
             }
         threading.Thread(
-            target=self._run, args=(action, arch, components, operator), daemon=True
+            target=self._run,
+            args=(action, arch, components, operator, parallel),
+            daemon=True,
         ).start()
         return True, {"build": "构建已启动", "package": "打包已启动", "verify": "验证已启动"}[action]
 
@@ -141,7 +145,10 @@ class BuildRunner:
                 cmd += ["--component", c]
         return cmd
 
-    def _run(self, action: str, arch: str, components: list[str], operator: str) -> None:
+    def _run(
+        self, action: str, arch: str, components: list[str],
+        operator: str, parallel: str = "auto",
+    ) -> None:
         import subprocess
 
         cmd = self._build_command(action, arch, components)
@@ -154,6 +161,9 @@ class BuildRunner:
         self._emit(f"$ {' '.join(cmd)}")
         rc = 1
         try:
+            env = dict(os.environ)
+            # 并发度交给脚本内的容量探测解析：auto / serial / 具体数字
+            env["SPRIXIN_PARALLEL"] = parallel
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -161,6 +171,7 @@ class BuildRunner:
                 text=True,
                 bufsize=1,
                 cwd=str(self.repo_root),
+                env=env,
             )
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -254,6 +265,11 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth() is None:
                 return
             return self._api_history()
+
+        if route == "/api/capacity":
+            if self._require_auth() is None:
+                return
+            return self._api_capacity()
 
         if route == "/api/build/log":
             if self._require_auth() is None:
@@ -454,6 +470,7 @@ class Handler(BaseHTTPRequestHandler):
             components=[str(c) for c in components],
             operator=subject,
             action=action,
+            parallel=str(body.get("parallel") or "auto"),
         )
         self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
 
@@ -483,6 +500,33 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             self.server.runner.unsubscribe(q)
+
+    # ── 容量 ────────────────────────────────────────────────────────
+
+    def _api_capacity(self) -> None:
+        """报告构建机容量与建议并发度。
+
+        并发度不适合硬编码：这套系统既可能跑在 160 核的服务器上，也可能
+        跑在开发机上。而且排查问题时往往需要退回串行，让日志不再交错。
+        """
+        from sprixin_build.capacity import detect
+
+        cap = detect(str(self.server.runner.workspace))
+        self._send_json({
+            "cores": cap.cores,
+            "mem_total_gb": round(cap.mem_total_gb, 1),
+            "mem_available_gb": round(cap.mem_available_gb, 1),
+            "disk_free_gb": round(cap.disk_free_gb, 1),
+            "load1": round(cap.load1, 2),
+            "suggest": {
+                "build": cap.suggest("build"),
+                "verify": cap.suggest("verify"),
+            },
+            "explain": {
+                "build": cap.explain("build"),
+                "verify": cap.explain("verify"),
+            },
+        })
 
     # ── 沿革 ────────────────────────────────────────────────────────
 
