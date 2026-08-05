@@ -58,7 +58,41 @@ echo "── 逐个启动服务 ──"
 for idx in 1 2 3 4 5; do
   echo "· startup.sh $idx"
   bash startup.sh "$idx" 2>&1 | tail -4
+
+  # aarch64 容器跑在 x86 内核上（binfmt + qemu），Redis 的 ARM64 写时复制
+  # 缺陷检测会因此误判并拒绝启动。这是模拟环境的限制，不是包的问题：
+  # 真实 ARM 机器上该检测依据的是其自身内核。
+  #
+  # 仅在验证时用临时副本抑制该检测，绝不改动包内的 redis.conf —— 若目标
+  # 机器的内核确实有此缺陷，Redis 拒绝启动是正确行为，抑制它等于放任
+  # 后台持久化时的数据损坏。
+  if [ "$idx" = 1 ] && grep -q "ARM64-COW-BUG" logs/redis/redis.log 2>/dev/null; then
+    echo "  检测到 ARM64 写时复制告警（模拟环境限制），以临时配置重试"
+    cp redis/redis.conf /tmp/redis-verify.conf
+    echo "ignore-warnings ARM64-COW-BUG" >> /tmp/redis-verify.conf
+    ./redis/bin/redis-server /tmp/redis-verify.conf >/dev/null 2>&1
+    sleep 3
+    if (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":6379\b"; then
+      echo "  redis 已启动（该抑制仅用于验证，未写入包内配置）"
+    fi
+  fi
 done
+
+# QEMU 模拟下 JVM 启动可比原生慢一个数量级，nacos 常在 startup.sh 的
+# 120 秒窗口内来不及监听端口。此处按实际情况再等，避免把"慢"误判成"坏"。
+if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"; then
+  if pgrep -f "nacos" >/dev/null 2>&1; then
+    echo
+    echo "nacos 进程在运行但端口未就绪，继续等待（模拟环境下 JVM 较慢）"
+    for i in $(seq 1 30); do
+      sleep 10
+      if (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":8848\b"; then
+        echo "  已就绪，额外用时 $((i * 10)) 秒"
+        break
+      fi
+    done
+  fi
+fi
 
 echo
 echo "── 服务状态 ──"
