@@ -107,6 +107,29 @@ OTP 仅在定义 `DYNAMIC_CRYPTO_LIB` 时才把回调分离为独立库，默认
 
 curl 的 SFTP 后端在 2^32 字节边界停止且不报错，留下一个"看起来完成"的半截文件。改用 lftp。凡是拉取大文件的脚本，都应以远端大小校验完整性，而不是只判断文件是否存在。
 
+### 长任务要用 systemd 托管，不能只靠 setsid
+
+全量验证动辄跑一小时以上。用 `setsid ... &` 从 SSH 会话启动，看似脱离了
+终端，实测仍会在连接断开时被回收 —— 主脚本一死，它派生的 docker 容器
+随之退出，日志停在半途，很像"卡住"，实则已被杀。
+
+改用 systemd 托管：
+
+```bash
+systemd-run --unit=sprixin-verify-arm \
+  --working-directory=/root/sprixin-build/src \
+  --setenv=SPRIXIN_PARALLEL=4 \
+  --property=StandardOutput=append:/tmp/verify.log \
+  --property=StandardError=append:/tmp/verify.log \
+  bash compat/e2e-test.sh <包路径>
+
+systemctl status sprixin-verify-arm     # 查看状态
+journalctl -u sprixin-verify-arm -f     # 跟踪日志
+```
+
+构建控制台本身也由 systemd 托管（`sprixin-build-console.service`），
+同理：nohup 启动的服务在 SSH 断开或机器重启后都不会恢复。
+
 ## 目录约定
 
 | 路径 | 用途 |
