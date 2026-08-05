@@ -97,11 +97,13 @@ def guess_packages(so: str) -> list[str]:
     m = re.search(r"\.so\.(\d+)", so)
     ver = m.group(1) if m else ""
 
-    # Debian 包名不用下划线，库名中的下划线一律写成连字符：
-    # libcom_err.so.2 → libcom-err2，libkysec_extend.so.0 → libkysec-extend0
+    # Debian 包名不用下划线，但替换方式在各版本间并不一致：
+    # jessie 写作 libcomerr2（直接去掉），buster 起写作 libcom-err2（换连字符）。
+    # 两种都试，否则同一个 .so 在不同版本的盘上只能命中一半。
     bases = [base]
     if "_" in base:
         bases.append(base.replace("_", "-"))
+        bases.append(base.replace("_", ""))
 
     cands: list[str] = []
     for b in bases:
