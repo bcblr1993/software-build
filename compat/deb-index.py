@@ -98,11 +98,15 @@ def guess_packages(so: str) -> list[str]:
     ver = m.group(1) if m else ""
     cands = []
     if ver:
+        # 两种惯例都存在：libtinfo.so.5 → libtinfo5，
+        # 而 libssh2.so.1 → libssh2-1、libpcre2-8.so.0 → libpcre2-8-0
         cands.append(f"{base}{ver}")
-    cands.append(base)
-    # libpcre2-8.so.0 → libpcre2-8-0 也可能写作 libpcre2-8-0
-    if ver and "-" in base:
         cands.append(f"{base}-{ver}")
+    cands.append(base)
+    # 少数包名末尾带 .0，如 libbz2.so.1.0 → libbz2-1.0
+    m2 = re.search(r"\.so\.([\d.]+)", so)
+    if m2 and m2.group(1) != ver:
+        cands.append(f"{base}-{m2.group(1)}")
     return cands
 
 

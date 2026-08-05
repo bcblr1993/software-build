@@ -9,6 +9,7 @@
 # keepalived 缺失 libcrypto.so.1.0.0 长期未被发现，正源于此。
 # 现改为断言 ldd 输出中不含 not found。
 
+# shellcheck disable=SC1007  # CDPATH= 是清空该变量的惯用法，非赋值笔误
 BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$BASE_DIR" || exit 1
 

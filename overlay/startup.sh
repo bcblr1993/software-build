@@ -17,6 +17,7 @@ usage() {
   exit 1
 }
 
+# shellcheck disable=SC1007  # CDPATH= 是清空该变量的惯用法，非赋值笔误
 BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$BASE_DIR" || exit 1
 

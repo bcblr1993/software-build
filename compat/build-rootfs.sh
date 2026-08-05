@@ -144,6 +144,9 @@ WANTED_DEB=(
   tar gzip xz-utils bzip2
   procps psmisc
   curl libcurl4 libcurl3
+  # curl 在 Debian 上还牵出这些：闭包能自动补齐，但直接列出可少一轮
+  libssh2-1 librtmp1 libidn11 libidn2-0 libnghttp2-14 libpsl5
+  libgssapi-krb5-2 libkrb5-3 libk5crypto3 libcomerr2 libldap-2.4-2
   hostname util-linux debianutils
   net-tools iproute2
   libreadline7 libreadline6 libsigsegv2 libmpfr6 libmpfr4
@@ -249,7 +252,7 @@ find_lib() {  # 在 rootfs 中查找某个 .so
 }
 
 resolve_deps() {
-  local round missing so base cand rpm added
+  local round missing so rpm added
   for round in 1 2 3 4; do
     missing=""
     # 逐个检查 rootfs 中的可执行文件与库

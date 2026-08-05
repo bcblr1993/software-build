@@ -15,6 +15,7 @@
 # 4. 增加校验和比对：包内附带 SHA256SUMS 时逐个核对，避免传输损坏的
 #    归档被安装后才在运行阶段暴露。
 
+# shellcheck disable=SC1007  # CDPATH= 是清空该变量的惯用法，非赋值笔误
 BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$BASE_DIR" || exit 1
 

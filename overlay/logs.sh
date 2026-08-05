@@ -22,6 +22,7 @@
 #   bash logs.sh all -n 20     每个组件各看 20 行
 #   bash logs.sh 2 -g error    只看 nginx 日志中含 error 的行
 
+# shellcheck disable=SC1007  # CDPATH= 是清空该变量的惯用法，非赋值笔误
 BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$BASE_DIR" || exit 1
 
@@ -134,8 +135,12 @@ follow_one() {
     return 1
   fi
   echo "正在跟踪 $label 日志，Ctrl-C 退出"
-  # shellcheck disable=SC2086
-  tail -n "$LINES" -f $(echo "$files" | tr '\n' ' ')
+  # 文件名逐个读入数组，不依赖词分割 —— 路径含空格时依然正确
+  local list=()
+  while IFS= read -r one; do
+    [ -n "$one" ] && list+=("$one")
+  done <<< "$files"
+  tail -n "$LINES" -f "${list[@]}"
 }
 
 # ── 参数解析 ────────────────────────────────────────────────────────

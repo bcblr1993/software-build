@@ -18,6 +18,7 @@
 #    留下不一致状态。现改为先 TERM 等待退出，超时再 KILL。
 # 4. `xargs kill -9` 在没有匹配进程时仍会执行 kill 并报错。现已避免。
 
+# shellcheck disable=SC1007  # CDPATH= 是清空该变量的惯用法，非赋值笔误
 BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$BASE_DIR" || exit 1
 
