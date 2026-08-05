@@ -64,7 +64,28 @@ CREATE TABLE IF NOT EXISTS verifications (
     checked_at    TEXT NOT NULL
 );
 
+-- 正式版本。
+--
+-- 构建只产出候选，须经实机测试确认后才提升为正式版本。二者分开存放：
+-- 候选可随时清理，正式版本一经发布即不可删除 —— 现场部署与回滚都依赖
+-- 它，误删的代价远高于占用的磁盘。
+CREATE TABLE IF NOT EXISTS releases (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    version       TEXT NOT NULL,
+    arch          TEXT NOT NULL,
+    filename      TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    sha256        TEXT NOT NULL,
+    size          INTEGER NOT NULL,
+    build_id      INTEGER REFERENCES builds(id),
+    released_by   TEXT,
+    released_at   TEXT NOT NULL,
+    test_note     TEXT,
+    UNIQUE (version, arch)
+);
+
 CREATE INDEX IF NOT EXISTS idx_builds_started ON builds(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_releases_at ON releases(released_at DESC);
 """
 
 
@@ -304,6 +325,54 @@ class BuildStore:
             artifacts=arts,
             verifications=vers,
         )
+
+    # ── 正式版本 ────────────────────────────────────────────────────
+
+    def add_release(
+        self,
+        *,
+        version: str,
+        arch: str,
+        filename: str,
+        path: str,
+        sha256: str,
+        size: int,
+        build_id: int | None = None,
+        released_by: str = "",
+        test_note: str = "",
+    ) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO releases (version, arch, filename, path, sha256, size,"
+                " build_id, released_by, released_at, test_note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    version, arch, filename, path, sha256, size, build_id,
+                    released_by, datetime.now().isoformat(timespec="seconds"), test_note,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def releases(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM releases ORDER BY id DESC LIMIT ?", (limit,)
+                )
+            ]
+
+    def is_released(self, version: str, arch: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM releases WHERE version = ? AND arch = ?", (version, arch)
+            ).fetchone()
+            return row is not None
+
+    def released_paths(self) -> set[str]:
+        """全部正式版本的文件路径，用于删除前的保护性检查。"""
+        with self._conn() as conn:
+            return {r["path"] for r in conn.execute("SELECT path FROM releases")}
 
     def to_json(self, record: BuildRecord) -> str:
         return json.dumps(

@@ -278,6 +278,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._api_capacity()
 
+        if route == "/api/releases":
+            if self._require_auth() is None:
+                return
+            return self._api_releases()
+
+        if route == "/api/artifacts":
+            if self._require_auth() is None:
+                return
+            return self._api_artifacts()
+
         if route == "/api/build/log":
             if self._require_auth() is None:
                 return
@@ -287,6 +297,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = urllib.parse.urlparse(self.path).path
+
+        # 上传须在读取 body 之前分流：_body() 会一次性读完整个请求体并按
+        # JSON 解析，上传的二进制会被它消费掉，随后的读取将无数据可读而阻塞。
+        if route == "/api/upload":
+            if self._require_auth() is None:
+                return
+            return self._api_upload()
+
         body = self._body()
 
         if route == "/api/enroll/begin":
@@ -308,6 +326,17 @@ class Handler(BaseHTTPRequestHandler):
             if subject is None:
                 return
             return self._api_build(body, subject)
+
+        if route == "/api/release":
+            subject = self._require_auth()
+            if subject is None:
+                return
+            return self._api_release(body, subject)
+
+        if route == "/api/artifact/delete":
+            if self._require_auth() is None:
+                return
+            return self._api_delete_artifact(body)
 
         self._send_json({"error": "未找到"}, 404)
 
@@ -507,6 +536,204 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             self.server.runner.unsubscribe(q)
+
+    # ── 上传 ────────────────────────────────────────────────────────
+
+    def _api_upload(self) -> None:
+        """接收自行准备的组件归档，打包时优先采用。
+
+        仅开放给无需编译的组件（build: repack）—— nacos 是 jar、influxdb
+        与 chronograf 是 Go 静态产物，都不链接系统库，改完直接替换即可用。
+        需编译的组件（nginx、redis 等）不在此列：它们必须走基线编译与
+        ABI 门禁，否则跨系统兼容性就无从保证。
+        """
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        component = (params.get("component") or [""])[0].strip()
+        arch = (params.get("arch") or ["all"])[0].strip()
+
+        try:
+            cfg = Config.load(self.server.config_path)
+        except ConfigError as exc:
+            return self._send_json({"error": str(exc)}, 500)
+
+        comp = cfg.components.get(component)
+        if comp is None:
+            return self._send_json({"error": f"未知组件: {component}"}, 400)
+        if comp.build != "repack":
+            return self._send_json({
+                "error": f"{component} 需在基线上编译并通过 ABI 门禁，不支持直接上传；"
+                         f"可上传的组件：" + "、".join(
+                             n for n, c in cfg.components.items() if c.build == "repack")
+            }, 400)
+
+        archs = list(cfg.architectures) if arch in ("", "all") else [arch]
+        for a in archs:
+            if a not in cfg.architectures:
+                return self._send_json({"error": f"未知架构: {a}"}, 400)
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return self._send_json({"error": "空文件"}, 400)
+        if length > 2 * 1024**3:
+            return self._send_json({"error": "文件超过 2GB"}, 413)
+
+        # 先落到临时文件，校验通过再放入正式位置，避免半截文件被用于构建
+        uploads = self.server.runner.workspace / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        tmp = uploads / f".incoming-{component}-{int(time.time())}"
+
+        received = 0
+        try:
+            with tmp.open("wb") as fh:
+                while received < length:
+                    chunk = self.rfile.read(min(1024 * 1024, length - received))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    received += len(chunk)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            return self._send_json({"error": f"写入失败: {exc}"}, 500)
+
+        if received != length:
+            tmp.unlink(missing_ok=True)
+            return self._send_json({"error": "上传不完整"}, 400)
+
+        ok, detail = self._inspect_archive(tmp, component)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return self._send_json({"error": detail}, 400)
+
+        import hashlib
+        digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+
+        placed = []
+        for a in archs:
+            dest_dir = uploads / a
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"{component}.tar.gz"
+            dest.write_bytes(tmp.read_bytes())
+            placed.append(str(dest))
+        tmp.unlink(missing_ok=True)
+
+        self._send_json({
+            "ok": True,
+            "component": component,
+            "arch": archs,
+            "size": received,
+            "sha256": digest,
+            "detail": detail,
+            "message": f"{component} 已接收，下次打包将采用该归档",
+        })
+
+    @staticmethod
+    def _inspect_archive(path: Path, component: str) -> tuple[bool, str]:
+        """检查上传的归档是否可用于打包。
+
+        要求与 install.sh 的解压方式一致：gzip 压缩的 tar，且恰有一层
+        顶层目录（解压时会 --strip-components 1）。不合规的包装到现场
+        才会暴露，代价太高，故在接收时就拦下。
+        """
+        import tarfile
+
+        try:
+            with tarfile.open(path, "r:gz") as tar:
+                names = tar.getnames()[:4000]
+        except (tarfile.TarError, OSError) as exc:
+            return False, f"不是有效的 tar.gz 归档: {exc}"
+
+        if not names:
+            return False, "归档为空"
+
+        tops = {n.split("/")[0] for n in names if n and not n.startswith("/")}
+        if len(tops) != 1:
+            return False, (
+                f"归档需恰有一层顶层目录（install.sh 解压时会 --strip-components 1），"
+                f"当前顶层为: {'、'.join(sorted(tops)[:5])}"
+            )
+
+        return True, f"顶层目录 {tops.pop()}/，共 {len(names)} 项"
+
+    # ── 发布 ────────────────────────────────────────────────────────
+
+    def _release_manager(self):
+        from sprixin_build.release import ReleaseManager
+        return ReleaseManager(self.server.runner.workspace, self.server.store, log=lambda *_: None)
+
+    def _api_releases(self) -> None:
+        """已发布的正式版本。"""
+        rels = self.server.store.releases()
+        self._send_json({"releases": [
+            {
+                "id": r["id"], "version": r["version"], "arch": r["arch"],
+                "filename": r["filename"], "sha256": r["sha256"], "size": r["size"],
+                "released_by": r["released_by"], "released_at": r["released_at"],
+                "test_note": r["test_note"] or "",
+            } for r in rels
+        ]})
+
+    def _api_artifacts(self) -> None:
+        """候选产物。正式版本不在其中，因而不会被误删。"""
+        try:
+            items = self._release_manager().deletable()
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+        self._send_json({"artifacts": items})
+
+    def _api_release(self, body: dict, subject: str) -> None:
+        """把候选产物提升为正式版本。
+
+        构建通过不等于可以发布 —— 还需在实机上验证。因此发布是一次显式
+        操作，并要求填写测试说明，便于日后追溯这个版本凭什么发出去。
+        """
+        from sprixin_build.release import ReleaseError
+
+        arch = str(body.get("arch") or "").strip()
+        version = str(body.get("version") or "").strip()
+        note = str(body.get("test_note") or "").strip()
+        artifact = body.get("artifact")
+
+        if not arch or not version:
+            return self._send_json({"error": "需指定架构与版本号"}, 400)
+
+        try:
+            result = self._release_manager().publish(
+                arch=arch,
+                version=version,
+                artifact=Path(artifact) if artifact else None,
+                released_by=subject,
+                test_note=note,
+            )
+        except ReleaseError as exc:
+            return self._send_json({"error": str(exc)}, 409)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": f"发布失败: {exc}"}, 500)
+
+        self._send_json({
+            "ok": True,
+            "version": result.version,
+            "arch": result.arch,
+            "sha256": result.sha256,
+            "size": result.size,
+            "message": f"{version} ({arch}) 已发布为正式版本，不可删除",
+        })
+
+    def _api_delete_artifact(self, body: dict) -> None:
+        from sprixin_build.release import ReleaseError
+
+        path = str(body.get("path") or "").strip()
+        if not path:
+            return self._send_json({"error": "需指定文件"}, 400)
+        try:
+            msg = self._release_manager().delete(path)
+        except ReleaseError as exc:
+            return self._send_json({"error": str(exc)}, 403)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": f"删除失败: {exc}"}, 500)
+        self._send_json({"ok": True, "message": msg})
 
     # ── 容量 ────────────────────────────────────────────────────────
 

@@ -326,6 +326,21 @@ def do_package(args, cfg: Config, ws: Workspace, *, arch: str,
         if sources.pop(name, None) is not None:
             log(f"  排除组件: {name}（已在清单中声明不再发布）")
 
+    # 自行上传的组件归档优先。nacos 是 jar、influxdb 与 chronograf 是 Go
+    # 静态产物，都不链接系统库，现场常需按需调整后直接替换，不必重新走
+    # 编译流程。仅对 build: repack 的组件生效 —— 需编译的组件必须经由
+    # 基线构建与 ABI 门禁，否则跨系统兼容性无从保证。
+    uploaded: dict[str, Path] = {}
+    upload_dir = ws.root / "uploads" / arch
+    if upload_dir.is_dir():
+        for f in sorted(upload_dir.glob("*.tar.gz")):
+            name = f.stem.replace(".tar", "")
+            comp = cfg.components.get(name)
+            if comp is None or comp.build != "repack":
+                continue
+            uploaded[name] = f
+            log(f"  采用上传的归档: {name} ← {f.name}")
+
     if not sources:
         log("没有可打包的组件，请先执行 build 或 import-base")
         return 1
@@ -348,6 +363,20 @@ def do_package(args, cfg: Config, ws: Workspace, *, arch: str,
                 original = archives.get(name, "")
                 version = original[len(name) + 1:].replace(".tar.gz", "").replace(".tgz", "") or "1.0"
                 kind = "repack"
+
+            # 上传的归档直接沿用，不重新打包：它已是成品，重新解压再压会
+            # 改变校验和，也可能丢失其中的特殊权限或符号链接
+            if name in uploaded:
+                item = packager.adopt(
+                    name, version, uploaded[name],
+                    original_name=archives.get(name, ""),
+                )
+                inner.append(item)
+                infos.append(ComponentInfo(
+                    name=name, version=version, build="uploaded",
+                    sha256=item.sha256, size=item.size,
+                ))
+                continue
 
             removed = clean_tree(path)
             if removed:

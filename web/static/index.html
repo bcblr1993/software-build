@@ -144,6 +144,24 @@
   </div>
 
   <div class="card">
+    <h2>上传自备组件</h2>
+    <p class="sub">nacos、influxdb 等无需编译的组件可自行调整后直接上传，打包时优先采用。
+      需编译的组件（nginx、redis、keepalived、rabbitmq）必须走基线编译与 ABI 门禁，不在此列。</p>
+    <div class="row">
+      <select id="up-comp"></select>
+      <select id="up-arch">
+        <option value="all">全部架构</option>
+        <option value="x86_64">仅 x86_64</option>
+        <option value="aarch64">仅 aarch64</option>
+      </select>
+      <input type="file" id="up-file" accept=".tar.gz,.tgz" style="flex:1;border:none;padding:0">
+      <button id="up-btn">上传</button>
+    </div>
+    <p class="note" id="up-msg" style="margin:10px 0 0">
+      归档需为 tar.gz 且恰有一层顶层目录 —— install.sh 解压时会 --strip-components 1。</p>
+  </div>
+
+  <div class="card">
     <h2>构建</h2>
     <p class="sub">改完版本号点「一键构建全部」即可：双架构编译、ABI 门禁、打包、
       并在全部目标系统容器中安装启动验证，一次做完。产物、校验和与验证结果自动入库。</p>
@@ -167,6 +185,32 @@
     </div>
     <p class="note" id="capacity-note" style="margin:10px 0 0"></p>
     <div id="log" style="margin-top:16px">等待构建…</div>
+  </div>
+
+  <div class="card">
+    <h2>发布正式版本</h2>
+    <p class="sub">构建通过不等于可以发布。产物需先在实机上验证，确认无误后再提升为正式版本。
+      正式版本一经发布即不可删除，并自动生成发布说明与变更记录。</p>
+    <div class="row">
+      <select id="rel-arch">
+        <option value="x86_64">x86_64</option>
+        <option value="aarch64">aarch64</option>
+      </select>
+      <input type="text" id="rel-version" placeholder="版本号，如 v14" style="width:140px">
+      <input type="text" id="rel-note" placeholder="实机测试说明（写清在哪台机器、测了什么）" style="flex:1">
+      <button class="primary" id="rel-btn">发布</button>
+    </div>
+    <p class="note" id="rel-msg" style="margin:10px 0 0"></p>
+
+    <div style="margin-top:18px">
+      <p style="font-size:13px;font-weight:500;margin:0 0 8px">已发布的正式版本</p>
+      <div id="rel-list"><p class="note">尚无正式版本</p></div>
+    </div>
+
+    <div style="margin-top:18px">
+      <p style="font-size:13px;font-weight:500;margin:0 0 8px">候选产物（可清理）</p>
+      <div id="art-list"><p class="note">暂无候选产物</p></div>
+    </div>
   </div>
 
   <div class="card">
@@ -199,6 +243,7 @@ async function refreshStatus() {
     loadComponents();
     loadHistory();
     loadCapacity();
+    loadReleases();
     if (data.busy) attachLog();
   } else {
     $('#gate').classList.remove('hide');
@@ -242,6 +287,13 @@ async function loadComponents() {
   const libs = Object.entries(data.vendored_libs).map(([n, l]) => `${n} ${l.version}`).join(' · ');
   $('#baseline-meta').textContent =
     `基线 glibc ${data.baseline.glibc_max} — 产物可运行于任何 glibc ≥ ${data.baseline.glibc_max} 的 Linux；随包库：${libs}`;
+
+  const upSel = $('#up-comp');
+  if (upSel) {
+    const able = data.components.filter(c => c.build === 'repack');
+    upSel.innerHTML = able.map(c => `<option value="${c.name}">${c.name}</option>`).join('')
+      || '<option value="">（无可上传组件）</option>';
+  }
 
   $('#comp-body').innerHTML = data.components.map(c => {
     const ver = c.version || Object.values(c.version_per_arch || {}).join(' / ') || '-';
@@ -337,6 +389,27 @@ $('#build-btn').onclick   = () => runAction('build');
 $('#package-btn').onclick = () => runAction('package');
 $('#verify-btn').onclick  = () => runAction('verify');
 
+$('#up-btn').onclick = async () => {
+  const f = $('#up-file').files[0];
+  const comp = $('#up-comp').value;
+  const arch = $('#up-arch').value;
+  if (!f) { $('#up-msg').textContent = '请先选择文件'; return; }
+
+  $('#up-btn').disabled = true;
+  $('#up-msg').textContent = `正在上传 ${f.name}（${(f.size/1048576).toFixed(1)} MB）…`;
+  try {
+    const r = await fetch(`/api/upload?component=${encodeURIComponent(comp)}&arch=${arch}`,
+                          {method: 'POST', body: f});
+    const d = await r.json();
+    $('#up-msg').textContent = r.ok
+      ? `${d.message} — ${d.detail}，sha256 ${d.sha256.slice(0,16)}…`
+      : (d.error || '上传失败');
+  } catch (e) {
+    $('#up-msg').textContent = '上传失败: ' + e.message;
+  }
+  $('#up-btn').disabled = false;
+};
+
 async function loadCapacity() {
   const {ok, data} = await api('/api/capacity');
   if (!ok) return;
@@ -346,6 +419,65 @@ async function loadCapacity() {
     `磁盘 ${data.disk_free_gb} GB · 负载 ${data.load1} — ` +
     `自动模式下构建并发 ${s.build}、验证并发 ${s.verify}`;
 }
+
+async function loadReleases() {
+  const [rel, art] = await Promise.all([api('/api/releases'), api('/api/artifacts')]);
+
+  if (rel.ok && rel.data.releases && rel.data.releases.length) {
+    $('#rel-list').innerHTML = rel.data.releases.map(r => `
+      <div class="hist pass">
+        <div class="row">
+          <strong>${r.version}</strong>
+          <span class="tag">${r.arch}</span>
+          <span class="tag ok">正式版本 · 不可删除</span>
+          <span class="note">${r.released_at} ${r.released_by || ''} · ${(r.size/1048576).toFixed(0)} MB</span>
+        </div>
+        <div class="note" style="margin-top:4px;font-family:var(--mono);font-size:11px">
+          ${r.filename}<br>sha256 ${r.sha256}</div>
+        ${r.test_note ? `<div class="note" style="margin-top:4px">实机测试：${r.test_note}</div>` : ''}
+      </div>`).join('');
+  } else {
+    $('#rel-list').innerHTML = '<p class="note">尚无正式版本</p>';
+  }
+
+  if (art.ok && art.data.artifacts && art.data.artifacts.length) {
+    $('#art-list').innerHTML = art.data.artifacts.map(a => `
+      <div class="row" style="padding:6px 0;border-bottom:1px solid var(--line)">
+        <span class="tag">${a.arch}</span>
+        <span style="font-size:13px;flex:1">${a.name}</span>
+        <span class="note">${(a.size/1048576).toFixed(0)} MB</span>
+        <button onclick="deleteArtifact('${a.path.replace(/'/g, "\\'")}')">删除</button>
+      </div>`).join('');
+  } else {
+    $('#art-list').innerHTML = '<p class="note">暂无候选产物</p>';
+  }
+}
+
+async function deleteArtifact(path) {
+  if (!confirm('确认删除该候选产物？正式版本不受影响。')) return;
+  const {ok, data} = await api('/api/artifact/delete',
+    {method: 'POST', body: JSON.stringify({path})});
+  $('#rel-msg').textContent = ok ? data.message : (data.error || '删除失败');
+  loadReleases();
+}
+
+$('#rel-btn').onclick = async () => {
+  const arch = $('#rel-arch').value;
+  const version = $('#rel-version').value.trim();
+  const note = $('#rel-note').value.trim();
+  if (!version) { $('#rel-msg').textContent = '请填写版本号'; return; }
+  if (!note && !confirm('未填写实机测试说明，仍要发布吗？')) return;
+
+  $('#rel-btn').disabled = true;
+  $('#rel-msg').textContent = '正在发布…';
+  const {ok, data} = await api('/api/release',
+    {method: 'POST', body: JSON.stringify({arch, version, test_note: note})});
+  $('#rel-msg').textContent = ok
+    ? `${data.message}　sha256 ${data.sha256.slice(0,16)}…`
+    : (data.error || '发布失败');
+  $('#rel-btn').disabled = false;
+  loadReleases();
+};
 
 async function loadHistory() {
   const {ok, data} = await api('/api/history');

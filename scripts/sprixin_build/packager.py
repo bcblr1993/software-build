@@ -222,6 +222,28 @@ class Packager:
         self.log(f"  {dest.name}  {size / 1024 / 1024:.1f} MB  {digest[:16]}…")
         return InnerArchive(component, version, dest, digest, size)
 
+    def adopt(
+        self,
+        component: str,
+        version: str,
+        archive: Path,
+        original_name: str = "",
+    ) -> InnerArchive:
+        """采用一份现成的归档，不重新打包。
+
+        用于自行准备的组件（nacos、influxdb 等无需编译者）。原样复制而非
+        解压重压：后者会改变校验和，也可能丢失其中的权限位与符号链接，
+        使上传的内容与最终入包的内容不再一致。
+        """
+        dest = self.out / _derive_archive_name(component, version, original_name)
+        dest.unlink(missing_ok=True)
+        shutil.copy2(archive, dest)
+
+        digest = sha256_path(dest)
+        size = dest.stat().st_size
+        self.log(f"  {dest.name}  {size / 1024 / 1024:.1f} MB  {digest[:16]}…  (采用上传)")
+        return InnerArchive(component, version, dest, digest, size)
+
     # ── 外层包 ──────────────────────────────────────────────────────
 
     def assemble(
