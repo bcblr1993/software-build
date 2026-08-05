@@ -435,6 +435,10 @@ async function loadReleases() {
         <div class="note" style="margin-top:4px;font-family:var(--mono);font-size:11px">
           ${r.filename}<br>sha256 ${r.sha256}</div>
         ${r.test_note ? `<div class="note" style="margin-top:4px">实机测试：${r.test_note}</div>` : ''}
+        <div class="row" style="margin-top:6px">
+          <button onclick="getLink('${r.path ? r.path.replace(/'/g, "\\'") : ''}', true)">下载</button>
+          <button onclick="getLink('${r.path ? r.path.replace(/'/g, "\\'") : ''}', false)">复制链接</button>
+        </div>
       </div>`).join('');
   } else {
     $('#rel-list').innerHTML = '<p class="note">尚无正式版本</p>';
@@ -446,10 +450,40 @@ async function loadReleases() {
         <span class="tag">${a.arch}</span>
         <span style="font-size:13px;flex:1">${a.name}</span>
         <span class="note">${(a.size/1048576).toFixed(0)} MB</span>
+        <button onclick="getLink('${a.path.replace(/'/g, "\\'")}', true)">下载</button>
+        <button onclick="getLink('${a.path.replace(/'/g, "\\'")}', false)">复制链接</button>
         <button onclick="deleteArtifact('${a.path.replace(/'/g, "\\'")}')">删除</button>
       </div>`).join('');
   } else {
     $('#art-list').innerHTML = '<p class="note">暂无候选产物</p>';
+  }
+}
+
+// 下载链接带签名且与路径绑定，可直接复制到任意机器用 wget/curl 取走，
+// 不需要登录。有效期 24 小时。
+async function getLink(path, download) {
+  if (!path) { $('#rel-msg').textContent = '该记录缺少文件路径'; return; }
+  const {ok, data} = await api('/api/download-link?path=' + encodeURIComponent(path));
+  if (!ok) { $('#rel-msg').textContent = data.error || '获取链接失败'; return; }
+
+  if (download) {
+    window.location.href = data.url;
+    $('#rel-msg').textContent = `正在下载 ${data.filename}（${(data.size/1048576).toFixed(0)} MB）`;
+    return;
+  }
+
+  const text = data.curl;
+  try {
+    await navigator.clipboard.writeText(text);
+    $('#rel-msg').textContent = '下载命令已复制，可在任意机器执行（24 小时内有效）';
+  } catch (e) {
+    // 非 HTTPS 下剪贴板 API 不可用，退回手动复制
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); $('#rel-msg').textContent = '下载命令已复制（24 小时内有效）'; }
+    catch (e2) { $('#rel-msg').textContent = text; }
+    document.body.removeChild(ta);
   }
 }
 

@@ -227,6 +227,35 @@ class Authenticator:
         sig = hmac.new(self._session_key, payload.encode(), hashlib.sha256).hexdigest()
         return f"{payload}.{sig}"
 
+    # ── 下载链接签名 ────────────────────────────────────────────────
+
+    def sign_download(self, path: str, ttl: int = 86400) -> tuple[str, int]:
+        """为某个文件签发下载凭证。
+
+        产物动辄数百 MB，取走它的场合往往是另一台机器上的 wget/curl，
+        带不了浏览器会话。因此改用签名链接：凭证与具体路径绑定，换一个
+        路径签名即失效，从而既能直接下载，又不至于变成任意文件读取。
+        """
+        expiry = int(time.time()) + ttl
+        payload = f"{path}|{expiry}"
+        sig = hmac.new(self._session_key, payload.encode(), hashlib.sha256).hexdigest()
+        return sig, expiry
+
+    def verify_download(self, path: str, expiry: str | int, sig: str) -> tuple[bool, str]:
+        try:
+            expiry_i = int(expiry)
+        except (TypeError, ValueError):
+            return False, "凭证格式不正确"
+
+        expected = hmac.new(
+            self._session_key, f"{path}|{expiry_i}".encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, sig or ""):
+            return False, "凭证无效"
+        if expiry_i < time.time():
+            return False, "链接已过期，请回控制台重新获取"
+        return True, ""
+
     def validate_session(self, token: str | None) -> str | None:
         """校验会话令牌，通过则返回 subject。"""
         if not token:

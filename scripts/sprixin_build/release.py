@@ -111,7 +111,7 @@ class ReleaseManager:
             previous_version=previous["version"] if previous else "",
             previous_components=prev_components,
             released_by=released_by, test_note=test_note,
-            verifications=self._verification_summary(build_id),
+            verifications=self._verification_summary(),
         )
         (target_dir / f"RELEASE-NOTES-{version}-{arch}.md").write_text(notes, encoding="utf-8")
 
@@ -211,16 +211,29 @@ class ReleaseManager:
                     return r
         return None
 
-    def _verification_summary(self, build_id: int | None) -> list[tuple[str, str, bool]]:
-        if build_id is None:
-            return []
-        record = self.store.get(build_id)
-        if record is None:
-            return []
-        return [
-            (v.get("target_os", "?"), v.get("glibc", "") or "?", bool(v.get("passed")))
-            for v in record.verifications
-        ]
+    def _verification_summary(self, build_id: int | None = None) -> list[dict]:
+        """读取端到端验证的记录。
+
+        两个架构都读：发布说明须同时交代 x86_64 与 aarch64 的验证情况，
+        只写当前架构等于把另一半藏起来。记录由 compat/e2e-test.sh 写入
+        verify-results/<架构>.json，是发布说明中系统清单的唯一来源，
+        不靠人工誊抄。
+        """
+        import json
+
+        out: list[dict] = []
+        result_dir = self.workspace / "verify-results"
+        if not result_dir.is_dir():
+            return out
+
+        for f in sorted(result_dir.glob("*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, list):
+                out.extend(d for d in data if isinstance(d, dict))
+        return out
 
     def _append_changelog(
         self,
@@ -405,7 +418,7 @@ def render_release_notes(
     previous_components: dict[str, str],
     released_by: str,
     test_note: str,
-    verifications: list[tuple[str, str, bool]] | None = None,
+    verifications: list[dict] | None = None,
 ) -> str:
     from datetime import datetime
 
@@ -478,14 +491,36 @@ def render_release_notes(
     a("")
 
     if verifications:
-        a("## 目标系统验证")
+        a("## 已验证的目标系统")
         a("")
-        a("下列验证容器均由目标系统 ISO 直接构建，在其中完整安装并启动全部服务：")
+        a("下列系统的验证容器均由其安装 ISO 直接构建，在其中以普通用户完整")
+        a("解压、安装并逐个启动全部服务，再确认端口监听与健康检查。")
         a("")
-        a("| 目标系统 | glibc | 结果 |")
-        a("|---|---|---|")
-        for os_name, glibc, ok in verifications:
-            a(f"| {os_name} | {glibc} | {'通过' if ok else '失败'} |")
+
+        by_arch: dict[str, list[dict]] = {}
+        for v in verifications:
+            by_arch.setdefault(v.get("arch", "?"), []).append(v)
+
+        for arch in sorted(by_arch):
+            items = by_arch[arch]
+            passed = sum(1 for v in items if v.get("passed"))
+            a(f"### {arch}（{passed}/{len(items)} 通过）")
+            a("")
+            a("| 操作系统 | glibc | 验证镜像来源 | redis | nginx | nacos | influxdb | rabbitmq | 结论 |")
+            a("|---|---|---|---|---|---|---|---|---|")
+            for v in sorted(items, key=lambda x: x.get("os_name", "")):
+                svc = v.get("services") or {}
+                cells = "".join(
+                    f" {'✓' if svc.get(name) else '✗'} |"
+                    for name in ("redis", "nginx", "nacos", "influxdb", "rabbitmq")
+                )
+                a(f"| {v.get('os_name', '?')} | {v.get('glibc', '?')} |"
+                  f" `{v.get('target', '?')}` |{cells}"
+                  f" {'**通过**' if v.get('passed') else '未通过'} |")
+            a("")
+
+        a("keepalived 需要 CAP_NET_ADMIN / CAP_NET_RAW，普通用户无法启动，")
+        a("故上表不含该项；验证中已确认其二进制可执行、依赖完整。")
         a("")
 
     if test_note:

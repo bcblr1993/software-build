@@ -17,6 +17,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -250,6 +251,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         route = parsed.path
 
+        if route == "/download":
+            # 不要求会话：产物常在另一台机器上用 wget/curl 取走。
+            # 凭证与路径绑定并有有效期，见 auth.sign_download。
+            return self._api_download()
+
         if route in ("/", "/index.html"):
             return self._serve_static("index.html")
         if route.startswith("/static/"):
@@ -287,6 +293,11 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth() is None:
                 return
             return self._api_artifacts()
+
+        if route == "/api/download-link":
+            if self._require_auth() is None:
+                return
+            return self._api_download_link()
 
         if route == "/api/build/log":
             if self._require_auth() is None:
@@ -671,7 +682,7 @@ class Handler(BaseHTTPRequestHandler):
                 "id": r["id"], "version": r["version"], "arch": r["arch"],
                 "filename": r["filename"], "sha256": r["sha256"], "size": r["size"],
                 "released_by": r["released_by"], "released_at": r["released_at"],
-                "test_note": r["test_note"] or "",
+                "test_note": r["test_note"] or "", "path": r["path"],
             } for r in rels
         ]})
 
@@ -734,6 +745,113 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             return self._send_json({"error": f"删除失败: {exc}"}, 500)
         self._send_json({"ok": True, "message": msg})
+
+    # ── 下载 ────────────────────────────────────────────────────────
+
+    def _resolve_artifact(self, raw: str) -> Path | None:
+        """把请求中的路径解析为工作区内的真实文件。
+
+        只允许 dist/ 与 releases/ 两处，且解析后须仍在其中 —— 否则
+        `../` 之类的写法就能读到任意文件。
+        """
+        ws = Path(self.server.runner.workspace).resolve()
+        allowed = [(ws / "dist").resolve(), (ws / "releases").resolve()]
+
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = ws / raw
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            return None
+
+        if not candidate.is_file():
+            return None
+        for root in allowed:
+            if str(candidate).startswith(str(root) + os.sep):
+                return candidate
+        return None
+
+    def _api_download_link(self) -> None:
+        """签发下载链接，供复制到任意机器使用。"""
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        raw = (params.get("path") or [""])[0]
+
+        target = self._resolve_artifact(raw)
+        if target is None:
+            return self._send_json({"error": "文件不存在或不在允许的目录内"}, 404)
+
+        sig, expiry = self.server.auth.sign_download(str(target))
+        query = urllib.parse.urlencode(
+            {"path": str(target), "exp": expiry, "sig": sig}
+        )
+
+        # 用请求时的 Host 拼出链接，这样在哪个地址访问控制台，
+        # 拿到的就是哪个地址的链接，不必在服务端写死主机名
+        host = self.headers.get("Host") or "localhost"
+        self._send_json({
+            "url": f"http://{host}/download?{query}",
+            "filename": target.name,
+            "size": target.stat().st_size,
+            "expires_at": expiry,
+            "curl": f"curl -fLO 'http://{host}/download?{query}'",
+        })
+
+    def _api_download(self) -> None:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        raw = (params.get("path") or [""])[0]
+        expiry = (params.get("exp") or [""])[0]
+        sig = (params.get("sig") or [""])[0]
+
+        ok, why = self.server.auth.verify_download(raw, expiry, sig)
+        if not ok:
+            return self._send_json({"error": why}, 403)
+
+        target = self._resolve_artifact(raw)
+        if target is None:
+            return self._send_json({"error": "文件不存在"}, 404)
+
+        size = target.stat().st_size
+        start, end = 0, size - 1
+
+        # 支持断点续传：几百 MB 的包在弱网下断一次就得重来，代价太大
+        rng = self.headers.get("Range", "")
+        partial = False
+        m = re.match(r"bytes=(\d*)-(\d*)", rng or "")
+        if m:
+            if m.group(1):
+                start = int(m.group(1))
+            if m.group(2):
+                end = min(int(m.group(2)), size - 1)
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            partial = True
+
+        length = end - start + 1
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+        self.send_header("Accept-Ranges", "bytes")
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+        try:
+            with target.open("rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     # ── 容量 ────────────────────────────────────────────────────────
 

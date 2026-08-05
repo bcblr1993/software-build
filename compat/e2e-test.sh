@@ -176,6 +176,20 @@ INNER_EOF
 exec bash /tmp/test-body.sh
 RUNNER_EOF
 
+# 读取验证容器所代表的系统身份。发布说明须写清在哪些系统上验证通过，
+# 且要精确到版本号 —— 仅有 ISO 文件名不够，需取系统自报的名称与 glibc。
+describe_target() {
+  local image="$1"
+  docker run --rm "$image" bash -c '
+    name=""
+    [ -r /etc/os-release ] && name="$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
+    [ -z "$name" ] && [ -r /etc/redhat-release ] && name="$(cat /etc/redhat-release)"
+    [ -z "$name" ] && [ -r /etc/issue ] && name="$(head -1 /etc/issue | sed "s/\\\\[a-z]//g")"
+    glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE "[0-9]+\.[0-9]+$")"
+    printf "%s\t%s\n" "${name:-未知}" "${glibc:-?}"
+  ' 2>/dev/null | tail -1
+}
+
 run_in() {
   local image="$1"
   local tag="${image#sprixin-compat:}"
@@ -276,13 +290,48 @@ for image in "${images[@]}"; do
 done
 wait
 
+# 验证结果落盘，供发布时引用。发布说明须写清在哪些系统上验证通过，
+# 且精确到版本号 —— 这份记录就是其唯一来源，不靠人工誊抄。
+RESULT_DIR="${SPRIXIN_WORKSPACE:-/root/sprixin-build}/verify-results"
+mkdir -p "$RESULT_DIR" 2>/dev/null
+RESULT_FILE="$RESULT_DIR/$PKG_ARCH.json"
+: > "$RESULT_FILE.tmp"
+
 failed=0
 for image in "${images[@]}"; do
   tag="${image#sprixin-compat:}"
   cat "$logdir/$tag.log" 2>/dev/null
   rc="$(cat "$logdir/$tag.rc" 2>/dev/null || echo 1)"
   [ "$rc" = "0" ] || failed=$((failed + 1))
+
+  desc="$(describe_target "$image")"
+  os_name="${desc%%$'\t'*}"
+  glibc="${desc##*$'\t'}"
+  # 逐服务的端口结论，供发布说明列出验证到什么程度
+  services=""
+  for svc in redis nginx nacos influxdb rabbitmq; do
+    if grep -q "^\[OK\]   $svc  " "$logdir/$tag.log" 2>/dev/null; then
+      services="$services${services:+,}\"$svc\": true"
+    else
+      services="$services${services:+,}\"$svc\": false"
+    fi
+  done
+
+  printf '{"target": "%s", "os_name": "%s", "glibc": "%s", "arch": "%s", "passed": %s, "package": "%s", "services": {%s}, "checked_at": "%s"}\n' \
+    "$tag" "${os_name//\"/}" "$glibc" "$PKG_ARCH" \
+    "$([ "$rc" = 0 ] && echo true || echo false)" \
+    "$(basename "$PKG")" "$services" "$(date -Iseconds)" >> "$RESULT_FILE.tmp"
 done
+
+# 汇成 JSON 数组
+{
+  echo "["
+  sed '$!s/$/,/' "$RESULT_FILE.tmp"
+  echo "]"
+} > "$RESULT_FILE" 2>/dev/null
+rm -f "$RESULT_FILE.tmp"
+echo
+echo "验证结果已记录: $RESULT_FILE"
 
 echo
 echo "════════════════════════════════════════════════════════════════════"
