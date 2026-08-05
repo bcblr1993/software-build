@@ -111,10 +111,18 @@ def _derive_archive_name(component: str, version: str, original: str = "") -> st
             stem = stem[: -len(suffix)]
             break
 
-    old_version = re.match(r"^([0-9][0-9A-Za-z._]*)", stem)
+    # 清单未定义的组件，其"版本"本就是从原名反推出来的整段（如 compat 的
+    # libs-1.0）。此时不存在版本变更，直接沿用原名，否则会把该段再嵌套一次
+    # 拼成 compat-libs-libs-1.0。
+    if stem == version:
+        return original
+
+    # 版本号止于第一个 - 或 _：influxdb-1.7.8_linux_arm64 的版本是 1.7.8，
+    # 而非 1.7.8_linux_arm64 —— 把平台后缀并进版本会导致替换后丢失后缀。
+    old_version = re.match(r"^([0-9][0-9A-Za-z.]*)", stem)
     if not old_version:
         # 形如 nacos-server-2.2.3：版本号不在紧邻组件名之处
-        m = re.search(r"[0-9][0-9A-Za-z._]*", stem)
+        m = re.search(r"[0-9][0-9A-Za-z.]*", stem)
         if not m:
             return default
         old_version = m

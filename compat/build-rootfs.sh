@@ -43,10 +43,15 @@ trap cleanup EXIT
 echo "挂载 $BASE_NAME"
 mount -o loop,ro "$ISO" "$MNT"
 
-# 目标架构：由 glibc 包的架构后缀判定，比解析文件名可靠
-ARCH="$(find "$MNT" -name 'glibc-[0-9]*.rpm' -print -quit 2>/dev/null \
-        | sed -E 's/.*\.([a-z0-9_]+)\.rpm$/\1/')"
-[ -n "$ARCH" ] || { echo "在 ISO 中找不到 glibc 包，无法判定架构" >&2; exit 1; }
+# 目标架构：由 glibc 包的架构后缀判定，比解析文件名可靠。
+# 安装盘常同时收录 32 位包（麒麟信安 3.3 即带有 i686 的 glibc），
+# 若取到第一个匹配就可能判成 i686，进而给 rootfs 补进一堆 32 位库。
+# 因此显式排除 32 位架构。
+ARCH="$(find "$MNT" -name 'glibc-[0-9]*.rpm' 2>/dev/null \
+        | sed -E 's/.*\.([a-z0-9_]+)\.rpm$/\1/' \
+        | grep -vE '^(i[3-6]86|noarch)$' \
+        | sort -u | head -1)"
+[ -n "$ARCH" ] || { echo "在 ISO 中找不到 64 位 glibc 包，无法判定架构" >&2; exit 1; }
 echo "目标架构 $ARCH"
 
 # 验证所需的最小包集合。
