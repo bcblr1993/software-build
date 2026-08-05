@@ -1,0 +1,56 @@
+name: CI
+
+# 只做静态检查。完整构建需要 docker、qemu 与目标系统 ISO（数十 GB），
+# 那属于内网构建机的职责，不适合放在公共 CI 上。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell 语法检查
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "语法错误: $f"; fail=1; }
+          done < <(git ls-files '*.sh')
+          exit $fail
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+          # 配方在容器内执行，其中的路径与变量由调用方注入
+          ignore_paths: scripts/recipes
+
+      - name: Python 语法与导入检查
+        run: |
+          python3 -m compileall -q scripts web
+          PYTHONPATH=scripts python3 -c "import sprixin_build; print(sprixin_build.__version__)"
+
+      - name: 组件清单可解析
+        run: |
+          pip install --quiet pyyaml
+          PYTHONPATH=scripts python3 -c "
+          from sprixin_build.config import Config
+          cfg = Config.load('components.yaml')
+          print(f'{cfg.package_name} {cfg.package_version}, 组件 {len(cfg.components)} 个')
+          pending = cfg.unlocked()
+          if pending:
+              print('未锁定校验和:', ', '.join(pending))
+          "
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 敏感信息扫描
+        run: bash scripts/lib/secrets-scan.sh --all
