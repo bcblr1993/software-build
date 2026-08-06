@@ -88,7 +88,11 @@ if ! (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":5672\b"; then
     echo
     echo "rabbitmq 未就绪，以宽松超时重试（模拟环境下 Erlang 启动较慢）"
     export PATH="$ERTS_DIR/bin:$PATH"
-    timeout 300 ./rabbitmq/sbin/rabbitmq-plugins enable rabbitmq_management >/dev/null 2>&1
+    # 这里曾用 timeout 300 跑 rabbitmq-plugins 并把输出与退出码一并丢弃，
+    # 于是 startup.sh 里那条 30 秒超时的同名调用失败时，验证仍然是绿的 ——
+    # 真机上 rabbitmq 完全起不来，17 个容器却全部通过。教训是：验证脚本
+    # 一旦替被验对象兜底，它就不再是在验证，而是在掩护。
+    # 现在只启动服务，插件配置由 startup.sh 的 ensure_plugins_enabled 负责。
     ./rabbitmq/sbin/rabbitmq-server -detached >/dev/null 2>&1
     # 轮询间隔取 3 秒而非 10 秒：等待上限不变，但服务就绪后能立即继续，
     # 不必空等一整个周期。乘以多个系统与多个服务，省下的时间相当可观。

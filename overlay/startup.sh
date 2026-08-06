@@ -185,9 +185,35 @@ restart_influxdb() {
   fi
 }
 
+# 确认插件已启用。
+#
+# 插件配置就是一个纯文本文件，包内已随附并写好 [rabbitmq_management].。
+# 原先每次启动都调 rabbitmq-plugins enable 去确认它，而那要启动一次
+# Erlang 虚拟机、加载六百多个 beam —— 实测耗时 32 秒，超时却设的是 30 秒。
+# 差这两秒就被 timeout 杀掉，且被杀时 Elixir 的 at_exit 会抛出
+# "escript: Internal error: undef"，与真实原因毫无关系，极难排查；
+# 更糟的是 || return 1 让 rabbitmq-server 索性不启动了。
+#
+# 该命令在配置已就绪时本就只输出 "Plugin configuration unchanged."，
+# 是一次纯粹的空转。改为直接检查文件内容，缺失时才补写。
+# 只认 rabbitmq_management 是否在列，不覆盖整个文件 —— 现场若自行
+# 启用过别的插件，那些配置须原样保留。
+ensure_plugins_enabled() {
+  local f="$BASE_DIR/rabbitmq/etc/rabbitmq/enabled_plugins"
+  if [ -f "$f" ] && grep -q "rabbitmq_management" "$f" 2>/dev/null; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$f")" 2>/dev/null
+  if echo "[rabbitmq_management]." > "$f" 2>/dev/null; then
+    echo "  已写入插件配置 $f"
+  else
+    echo "  警告：无法写入 $f，management 插件（15672）可能不可用" >&2
+  fi
+}
+
 restart_rabbitmq() {
   echo "starting rabbitmq service, please..."
-  run_bounded 30 "$BASE_DIR/rabbitmq/sbin/rabbitmq-plugins" enable rabbitmq_management || return 1
+  ensure_plugins_enabled
   "$BASE_DIR/rabbitmq/sbin/rabbitmq-server" -detached || return 1
   local i
   for ((i = 1; i <= 90; i++)); do
