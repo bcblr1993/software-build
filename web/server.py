@@ -130,8 +130,8 @@ class BuildRunner:
             "verify": "验证已启动",
         }[action]
 
-    def start_remote_verify(self, *, target, package, arch: str, operator: str,
-                            script) -> tuple[bool, str]:
+    def start_remote_verify(self, *, machine, target: str, package, arch: str,
+                            operator: str, script) -> tuple[bool, str]:
         """在真实机器上跑一遍验证，通过后自动勾上清单。
 
         与构建共用同一把锁：两者都要独占目标机与网络带宽，并发跑只会
@@ -143,43 +143,42 @@ class BuildRunner:
             self._history = []
             self._current = {
                 "action": "remote-verify", "arch": arch,
-                "components": [target.name], "operator": operator,
+                "components": [target], "operator": operator,
                 "parallel": "serial", "started_at": time.time(),
             }
         threading.Thread(
             target=self._run_remote_verify,
-            args=(target, package, arch, operator, script),
+            args=(machine, target, package, arch, operator, script),
             daemon=True,
         ).start()
-        return True, f"已开始在 {target.host} 上验证 {target.name}"
+        return True, f"已开始在 {machine.host} 上验证 {target}"
 
-    def _run_remote_verify(self, target, package, arch, operator, script) -> None:
+    def _run_remote_verify(self, machine, target, package, arch, operator, script) -> None:
         from sprixin_build.checklist import Checklist
         from sprixin_build.targets import TargetError, run_verify
 
         rc = 1
         try:
-            self._emit(f"目标系统 : {target.name}")
-            self._emit(f"目标机器 : {target.username}@{target.host}:{target.port}")
-            self._emit(f"运行身份 : {target.run_as}（与现场一致，非 root）")
+            self._emit(f"目标系统 : {target}")
+            self._emit(f"目标机器 : {machine.label or machine.host}")
+            self._emit(f"登录身份 : {machine.username}@{machine.host}:{machine.port}")
             self._emit(f"安装包   : {package.name}")
             self._emit("")
-            result = run_verify(target, package, script, log=self._emit)
+            result = run_verify(machine, package, script, log=self._emit)
             for line in (result["output"] or "").splitlines():
                 self._emit(line)
             if result["passed"]:
                 # 验证通过即代表这台真机确认过了，自动勾上，免去人工再点一次
                 Checklist(self.workspace).mark(
-                    package.name, target.name, passed=True,
-                    operator=operator,
-                    note=f"{target.host}（自动验证）",
+                    package.name, target, passed=True, operator=operator,
+                    note=f"{machine.label or machine.host}（自动验证）",
                 )
                 self._emit("")
-                self._emit(f"✓ {target.name} 实机验证通过，已在清单中勾选")
+                self._emit(f"✓ {target} 实机验证通过，已在清单中勾选")
                 rc = 0
             else:
                 self._emit("")
-                self._emit(f"✗ {target.name} 实机验证未通过，清单未勾选")
+                self._emit(f"✗ {target} 实机验证未通过，清单未勾选")
                 if result["stderr"]:
                     self._emit(result["stderr"][-800:])
         except TargetError as exc:
@@ -361,8 +360,8 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/checklist":
             return self._api_checklist()
 
-        if route == "/api/targets":
-            return self._api_targets()
+        if route == "/api/machines":
+            return self._api_machines()
 
         if route == "/api/download-link":
             if self._require_auth() is None:
@@ -400,12 +399,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_member_remove(body)
         if route == "/api/checklist/mark":
             return self._api_checklist_mark(body)
-        if route == "/api/targets/save":
-            return self._api_target_save(body)
-        if route == "/api/targets/delete":
-            return self._api_target_delete(body)
-        if route == "/api/targets/check":
-            return self._api_target_check(body)
+        if route == "/api/machines/save":
+            return self._api_machine_save(body)
+        if route == "/api/machines/delete":
+            return self._api_machine_delete(body)
+        if route == "/api/machines/bind":
+            return self._api_machine_bind(body)
+        if route == "/api/machines/check":
+            return self._api_machine_check(body)
         if route == "/api/targets/verify":
             subject = self._require_auth()
             if subject is None:
@@ -894,77 +895,101 @@ class Handler(BaseHTTPRequestHandler):
         arch = str(body.get("arch") or "x86_64").strip()
         self._send_json({"ok": True, "status": self._checklist().status(arch, pkg)})
 
-    # ── 目标机登记与远程实机验证 ────────────────────────────────────
+    # ── 目标机器管理与远程实机验证 ──────────────────────────────────
 
     def _target_store(self):
         from sprixin_build.targets import TargetStore
 
         return TargetStore(Path(self.server.workspace) / "secrets")
 
-    def _api_targets(self) -> None:
+    def _api_machines(self) -> None:
+        """机器池与绑定关系。口令永不回显。"""
         if self._require_auth() is None:
             return
-        # 只返回脱敏信息：口令永不回显
         store = self._target_store()
         self._send_json({
-            "targets": {n: t.redacted() for n, t in store.all().items() if t}
+            "machines": [m.redacted() for m in store.machines().values()],
+            "bindings": store.bindings(),
         })
 
-    def _api_target_save(self, body: dict) -> None:
+    def _api_machine_save(self, body: dict) -> None:
         if self._require_auth() is None:
             return
-        from sprixin_build.targets import Target, TargetError
+        from sprixin_build.targets import Machine, TargetError
 
         try:
-            t = Target(
-                name=str(body.get("name") or "").strip(),
+            mid = self._target_store().save_machine(Machine(
+                id=str(body.get("id") or "").strip(),
+                label=str(body.get("label") or "").strip(),
                 host=str(body.get("host") or "").strip(),
                 port=int(body.get("port") or 22),
-                username=str(body.get("username") or "root").strip(),
+                username=str(body.get("username") or "sprixin").strip(),
                 password=str(body.get("password") or ""),
-                run_as=str(body.get("run_as") or "sprixin").strip(),
                 note=str(body.get("note") or "").strip(),
-            )
-            self._target_store().put(t)
+            ))
         except (TargetError, ValueError) as exc:
             return self._send_json({"error": str(exc)}, 400)
-        self._send_json({"ok": True})
+        self._send_json({"ok": True, "id": mid})
 
-    def _api_target_delete(self, body: dict) -> None:
+    def _api_machine_delete(self, body: dict) -> None:
         if self._require_auth() is None:
             return
         from sprixin_build.targets import TargetError
 
         try:
-            self._target_store().delete(str(body.get("name") or ""))
+            self._target_store().delete_machine(str(body.get("id") or ""))
         except TargetError as exc:
             return self._send_json({"error": str(exc)}, 404)
         self._send_json({"ok": True})
 
-    def _api_target_check(self, body: dict) -> None:
+    def _api_machine_bind(self, body: dict) -> None:
+        """把某个目标系统绑定到一台机器（空 id 表示解绑）。"""
+        if self._require_auth() is None:
+            return
+        from sprixin_build.targets import TargetError
+
+        try:
+            self._target_store().bind(
+                str(body.get("target") or "").strip(),
+                str(body.get("id") or "").strip(),
+            )
+        except TargetError as exc:
+            return self._send_json({"error": str(exc)}, 409)
+        self._send_json({"ok": True})
+
+    def _api_machine_check(self, body: dict) -> None:
         if self._require_auth() is None:
             return
         from sprixin_build.targets import TargetError, check
 
-        t = self._target_store().get(str(body.get("name") or ""))
-        if t is None:
-            return self._send_json({"error": "尚未登记该目标机"}, 404)
+        m = self._target_store().machine(str(body.get("id") or ""))
+        if m is None:
+            return self._send_json({"error": "没有这台机器"}, 404)
+
+        # 若已绑定到某个目标系统，一并核对系统与 glibc 是否对得上
+        target = str(body.get("target") or "").strip()
+        expect_glibc = ""
+        if target:
+            arch = str(body.get("arch") or "x86_64").strip()
+            for row in self._checklist().container_results(arch):
+                if row.get("target") == target:
+                    expect_glibc = row.get("glibc", "")
+                    break
         try:
-            self._send_json(check(t))
+            self._send_json(check(m, expect_target=target, expect_glibc=expect_glibc))
         except TargetError as exc:
             return self._send_json({"error": str(exc)}, 502)
         except Exception as exc:  # noqa: BLE001
             return self._send_json({"error": f"探测失败: {exc}"}, 502)
 
     def _api_target_verify(self, body: dict, subject: str) -> None:
-        """把包送到目标机跑一遍完整验证，通过则自动勾上清单。"""
-        from sprixin_build.targets import TargetError, run_verify
-
-        name = str(body.get("name") or "").strip()
+        """把包送到已绑定的机器上跑一遍完整验证，通过则自动勾上清单。"""
+        target = str(body.get("target") or "").strip()
         arch = str(body.get("arch") or "x86_64").strip()
-        t = self._target_store().get(name)
-        if t is None:
-            return self._send_json({"error": "尚未登记该目标机"}, 404)
+
+        m = self._target_store().for_target(target)
+        if m is None:
+            return self._send_json({"error": "该目标系统尚未绑定机器"}, 404)
 
         pkg = body.get("package")
         target_pkg = Path(pkg) if pkg else self._latest_artifact(arch)
@@ -972,7 +997,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": f"{arch} 尚无可用的候选产物"}, 404)
 
         ok, msg = self.server.runner.start_remote_verify(
-            target=t, package=target_pkg, arch=arch, operator=subject,
+            machine=m, target=target, package=target_pkg, arch=arch,
+            operator=subject,
             script=REPO_ROOT / "compat" / "realmachine-verify.sh",
         )
         self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)

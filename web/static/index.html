@@ -87,7 +87,6 @@
     font-family: var(--mono); font-size: 15px; background: #f2f4f7;
     padding: 12px; border-radius: 6px; word-break: break-all; user-select: all;
   }
-  .hide { display: none; }
   .err { color: var(--bad); font-size: 13px; min-height: 20px; }
   .note { color: var(--muted); font-size: 12px; }
 
@@ -128,6 +127,12 @@
   }
   .result.ok { background: #e7f6ed; color: var(--ok); }
   .result.bad { background: #fdecea; color: var(--bad); }
+
+  /* 工具类置于末尾。
+     .hide 与 .mask 等组件类同为单类选择器，权重相等时后定义者胜出 ——
+     .hide 若排在前面，.mask 的 display:flex 就会盖过它，对话框会在
+     页面加载时自行弹出。放在最后可免去逐个单独压制。 */
+  .hide { display: none; }
 </style>
 </head>
 <body>
@@ -229,6 +234,18 @@
   </div>
 
   <div class="card">
+    <h2>目标机器</h2>
+    <p class="sub">登记用于实机验证的真实机器。<strong>请使用普通用户</strong> ——
+      现场没有 root，用 root 验证会得出与现场不符的结论。
+      一台机器只能绑定一个目标系统。</p>
+    <div id="mc-body"><p class="note">加载中…</p></div>
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="mc-add">添加机器</button>
+      <span class="note" id="mc-msg"></span>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>发布正式版本</h2>
     <p class="sub">每个目标系统都要在真实机器上装一遍、跑一遍，逐台确认后勾选。
       全部勾完才达到发布标准。正式版本一经发布即不可删除，并自动生成发布说明与变更记录。</p>
@@ -304,10 +321,14 @@
     <div id="tg-mask" class="mask hide">
       <div class="modal">
         <div class="head">
-          <h3>配置目标机</h3>
+          <h3 id="tg-title">添加机器</h3>
           <p class="note" id="tg-sys"></p>
         </div>
         <div class="body">
+          <div class="field">
+            <label>名称</label>
+            <input type="text" id="tg-label" placeholder="便于辨认，如：凝思 6.0.99 测试机">
+          </div>
           <div class="field-row">
             <div class="field" style="flex:3">
               <label>主机地址</label>
@@ -318,16 +339,12 @@
               <input type="text" id="tg-port" placeholder="22">
             </div>
           </div>
-          <div class="field-row">
-            <div class="field">
-              <label>登录用户</label>
-              <input type="text" id="tg-user" placeholder="root">
-              <div class="hint">用于推送安装包并切换身份</div>
-            </div>
-            <div class="field">
-              <label>验证身份</label>
-              <input type="text" id="tg-runas" placeholder="sprixin">
-              <div class="hint">以此普通用户运行，与现场一致</div>
+          <div class="field">
+            <label>登录用户</label>
+            <input type="text" id="tg-user" placeholder="sprixin">
+            <div class="hint">
+              以该用户登录并运行验证，不做身份切换。<strong>必须是普通用户</strong> ——
+              现场没有 root 权限，用 root 跑出来的结果不能代表现场。
             </div>
           </div>
           <div class="field">
@@ -349,6 +366,7 @@
           <button class="primary" id="tg-save">保存</button>
         </div>
       </div>
+    </div>
     </div>
 
 </div>
@@ -378,6 +396,7 @@ async function refreshStatus() {
     loadCapacity();
     loadReleases();
     loadMembers();
+    loadMachines();
     loadChecklist();
     if (data.busy) attachLog();
   } else {
@@ -727,26 +746,78 @@ async function deleteArtifact(path) {
 
 // ── 实机验证清单 ──────────────────────────────────────────────────
 let ckState = null;
-let targetsCache = {};
 
-// 目标机登记：为每个目标系统绑定一台真实机器，之后可一键送包过去验证。
+// ── 目标机器 ──────────────────────────────────────────────────────
+// 机器与目标系统分开管理：这里维护机器池，验证清单上再选择绑定哪一台。
 // 口令存在构建机的 secrets/ 下（权限 600，已在 .gitignore 中），接口永不回显。
-let tgCurrent = null;
+let machines = [];      // [{id,label,host,port,username,note,configured}]
+let bindings = {};      // {目标系统: 机器id}
+let tgEditing = null;   // 正在编辑的机器 id，null 表示新增
 
-function openTargetDialog(name) {
-  const t = targetsCache[name] || {};
-  tgCurrent = name;
-  $('#tg-sys').textContent = name;
-  $('#tg-host').value = t.host || '';
-  $('#tg-port').value = t.port || 22;
-  $('#tg-user').value = t.username || 'root';
-  $('#tg-runas').value = t.run_as || 'sprixin';
-  $('#tg-note').value = t.note || '';
+async function loadMachines() {
+  const {ok, data} = await api('/api/machines');
+  machines = (ok && data.machines) ? data.machines : [];
+  bindings = (ok && data.bindings) ? data.bindings : {};
+  renderMachines();
+}
+
+function renderMachines() {
+  if (!machines.length) {
+    $('#mc-body').innerHTML = '<p class="note">尚未登记任何机器。点下方「添加机器」开始。</p>';
+    return;
+  }
+  const boundTo = {};
+  for (const [t, id] of Object.entries(bindings)) boundTo[id] = t;
+
+  $('#mc-body').innerHTML = `<table><thead><tr>
+      <th>名称</th><th style="width:22%">地址</th><th style="width:14%">登录用户</th>
+      <th style="width:28%">已绑定系统</th><th class="acts" style="width:150px"></th>
+    </tr></thead><tbody>${machines.map(m => `<tr>
+      <td><strong>${m.label}</strong>${m.note ? `<div class="note">${m.note}</div>` : ''}</td>
+      <td class="note">${m.host}:${m.port}</td>
+      <td>${m.username === 'root'
+            ? `<span class="tag warn">root</span>`
+            : `<span class="note">${m.username}</span>`}</td>
+      <td class="note">${boundTo[m.id] || '—'}</td>
+      <td class="acts">
+        <button data-mtest="${m.id}">测试</button>
+        <button data-medit="${m.id}">编辑</button>
+      </td>
+    </tr>`).join('')}</tbody></table>`;
+
+  document.querySelectorAll('#mc-body button[data-medit]').forEach(b => {
+    b.onclick = () => openMachineDialog(b.dataset.medit);
+  });
+  document.querySelectorAll('#mc-body button[data-mtest]').forEach(b => {
+    b.onclick = async () => {
+      b.disabled = true;
+      $('#mc-msg').textContent = '正在连接…';
+      const {ok, data} = await api('/api/machines/check',
+        {method: 'POST', body: JSON.stringify({id: b.dataset.mtest})});
+      $('#mc-msg').textContent = ok
+        ? `${data.info.os || '连接成功'}　glibc ${data.info.glibc || '?'}`
+          + (data.warnings.length ? `　注意：${data.warnings[0]}` : '')
+        : (data.error || '连接失败');
+      b.disabled = false;
+    };
+  });
+}
+
+function openMachineDialog(id) {
+  const m = machines.find(x => x.id === id) || {};
+  tgEditing = id || null;
+  $('#tg-title').textContent = id ? '编辑机器' : '添加机器';
+  $('#tg-sys').textContent = id ? (m.host + ':' + m.port) : '';
+  $('#tg-label').value = m.label || '';
+  $('#tg-host').value = m.host || '';
+  $('#tg-port').value = m.port || 22;
+  $('#tg-user').value = m.username || 'sprixin';
+  $('#tg-note').value = m.note || '';
   $('#tg-pass').value = '';
-  $('#tg-del').style.display = t.configured ? '' : 'none';
+  $('#tg-del').style.display = id ? '' : 'none';
   tgResult('', '');
   $('#tg-mask').classList.remove('hide');
-  setTimeout(() => $('#tg-host').focus(), 50);
+  setTimeout(() => $('#tg-label').focus(), 50);
 }
 
 function tgResult(text, cls) {
@@ -755,83 +826,77 @@ function tgResult(text, cls) {
   el.className = 'result' + (cls ? ' ' + cls : '') + (text ? '' : ' hide');
 }
 
-function tgPayload() {
-  return {
-    name: tgCurrent,
-    host: $('#tg-host').value.trim(),
-    port: parseInt($('#tg-port').value, 10) || 22,
-    username: $('#tg-user').value.trim() || 'root',
-    password: $('#tg-pass').value,
-    run_as: $('#tg-runas').value.trim() || 'sprixin',
-    note: $('#tg-note').value.trim(),
-  };
-}
+function tgClose() { $('#tg-mask').classList.add('hide'); tgEditing = null; }
 
-function tgClose() { $('#tg-mask').classList.add('hide'); tgCurrent = null; }
-
+$('#mc-add').onclick = () => openMachineDialog(null);
 $('#tg-cancel').onclick = tgClose;
 $('#tg-mask').onclick = (e) => { if (e.target === $('#tg-mask')) tgClose(); };
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#tg-mask').classList.contains('hide')) tgClose();
 });
 
-// 先存再测：探测要用到刚填的口令，而口令不经接口回传，只能落盘后再读
-async function tgSaveThen(afterFn) {
-  const p = tgPayload();
-  if (!p.host) { tgResult('请填写主机地址', 'bad'); return false; }
-  const {ok, data} = await api('/api/targets/save',
-    {method: 'POST', body: JSON.stringify(p)});
-  if (!ok) { tgResult(data.error || '保存失败', 'bad'); return false; }
-  await loadTargets();
-  if (afterFn) await afterFn();
-  return true;
+// 先存再测：探测要用刚填的口令，而口令不经接口回传，只能落盘后再读
+async function tgSave() {
+  const payload = {
+    id: tgEditing || '',
+    label: $('#tg-label').value.trim(),
+    host: $('#tg-host').value.trim(),
+    port: parseInt($('#tg-port').value, 10) || 22,
+    username: $('#tg-user').value.trim() || 'sprixin',
+    password: $('#tg-pass').value,
+    note: $('#tg-note').value.trim(),
+  };
+  if (!payload.host) { tgResult('请填写主机地址', 'bad'); return null; }
+  const {ok, data} = await api('/api/machines/save',
+    {method: 'POST', body: JSON.stringify(payload)});
+  if (!ok) { tgResult(data.error || '保存失败', 'bad'); return null; }
+  tgEditing = data.id;
+  await loadMachines();
+  return data.id;
 }
 
 $('#tg-test').onclick = async () => {
   $('#tg-test').disabled = true;
   tgResult('正在连接…', '');
-  await tgSaveThen(async () => {
-    const r = await api('/api/targets/check',
-      {method: 'POST', body: JSON.stringify({name: tgCurrent})});
-    if (!r.ok) { tgResult(r.data.error || '连接失败', 'bad'); return; }
-    const i = r.data.info || {}, w = r.data.warnings || [];
-    const lines = [
-      `系统　　：${i.os || '未知'}`,
-      `架构　　：${i.arch || '?'}　glibc ${i.glibc || '?'}`,
-      `主机名　：${i.hostname || '?'}${i.hostname_resolves === 'no' ? '（解析异常）' : ''}`,
-      `验证身份：${$('#tg-runas').value.trim()}${i.runas === 'yes' ? ' 存在' : ' 不存在'}`,
-      `可用空间：${i.free ? Math.floor(i.free / 1048576) + ' GB' : '未知'}`,
-    ];
-    if (w.length) lines.push('', '需注意：', ...w.map(x => '· ' + x));
-    tgResult(lines.join('\n'), w.length ? '' : 'ok');
-  });
+  const id = await tgSave();
+  if (id) {
+    const r = await api('/api/machines/check', {method: 'POST', body: JSON.stringify({id})});
+    if (!r.ok) tgResult(r.data.error || '连接失败', 'bad');
+    else {
+      const i = r.data.info || {}, w = r.data.warnings || [];
+      const lines = [
+        `系统　　：${i.os || '未知'}`,
+        `架构　　：${i.arch || '?'}　glibc ${i.glibc || '?'}`,
+        `主机名　：${i.hostname || '?'}${i.hostname_resolves === 'no' ? '（解析异常）' : ''}`,
+        `登录身份：${i.whoami || '?'}`,
+        `可用空间：${i.free ? Math.floor(i.free / 1048576) + ' GB' : '未知'}`,
+      ];
+      if (w.length) lines.push('', '需注意：', ...w.map(x => '· ' + x));
+      tgResult(lines.join('\n'), w.length ? '' : 'ok');
+    }
+  }
   $('#tg-test').disabled = false;
 };
 
 $('#tg-save').onclick = async () => {
   $('#tg-save').disabled = true;
-  if (await tgSaveThen(null)) { tgClose(); loadChecklist(); }
+  if (await tgSave()) { tgClose(); loadChecklist(); }
   $('#tg-save').disabled = false;
 };
 
 $('#tg-del').onclick = async () => {
-  if (!confirm(`删除 ${tgCurrent} 的目标机配置？`)) return;
-  const {ok, data} = await api('/api/targets/delete',
-    {method: 'POST', body: JSON.stringify({name: tgCurrent})});
+  if (!confirm('删除这台机器？与之绑定的目标系统会一并解除绑定。')) return;
+  const {ok, data} = await api('/api/machines/delete',
+    {method: 'POST', body: JSON.stringify({id: tgEditing})});
   if (!ok) { tgResult(data.error || '删除失败', 'bad'); return; }
-  await loadTargets();
+  await loadMachines();
   tgClose();
   loadChecklist();
 };
 
-async function loadTargets() {
-  const {ok, data} = await api('/api/targets');
-  targetsCache = (ok && data.targets) ? data.targets : {};
-}
-
 async function loadChecklist() {
   const arch = $('#rel-arch').value;
-  await loadTargets();
+  await loadMachines();
   const {ok, data} = await api(`/api/checklist?arch=${encodeURIComponent(arch)}`);
   if (!ok) { $('#ck-body').innerHTML = '<p class="note">无法读取验证清单</p>'; return; }
   ckState = data;
@@ -862,10 +927,18 @@ async function loadChecklist() {
       // 主标题用 target：同一发行版的不同镜像 PRETTY_NAME 可能完全相同
       // （凝思 6.0.80 的两个镜像即如此），只显示 os_name 会看起来像重复项。
       const sub = (i.os_name && i.os_name !== i.target) ? i.os_name : '';
-      const tg = targetsCache[i.target];
-      const sshCell = tg && tg.configured
-        ? `<span class="note">${tg.username}@${tg.host}</span>`
-        : '<span class="note">未配置</span>';
+      // 目标机改为从机器池中选择。已被别的系统绑走的机器不列出 ——
+      // 一台机器只装一个操作系统，只能对应一个目标系统。
+      const boundId = bindings[i.target] || '';
+      const takenBy = {};
+      for (const [t, id] of Object.entries(bindings)) if (t !== i.target) takenBy[id] = t;
+      const opts = ['<option value="">未绑定</option>'].concat(
+        machines.filter(m => !takenBy[m.id]).map(m =>
+          `<option value="${m.id}"${m.id === boundId ? ' selected' : ''}>${m.label}</option>`)
+      ).join('');
+      const sshCell = machines.length
+        ? `<select data-bind="${i.target}" style="font-size:12px;padding:3px 6px;max-width:100%">${opts}</select>`
+        : '<span class="note">先添加机器</span>';
       return `<tr>
         <td style="width:36px">${cbox}</td>
         <td>
@@ -878,8 +951,7 @@ async function loadChecklist() {
         <td style="width:150px">${done}</td>
         <td style="width:150px">${sshCell}</td>
         <td class="acts" style="width:170px">
-          <button data-cfg="${i.target}">配置</button>
-          <button data-run="${i.target}" ${tg && tg.configured ? '' : 'disabled'}>自动验证</button>
+          <button data-run="${i.target}" ${boundId ? '' : 'disabled'}>自动验证</button>
         </td>
       </tr>`;
     }).join('');
@@ -888,15 +960,21 @@ async function loadChecklist() {
         <th>目标机</th><th class="acts"></th>
       </tr></thead><tbody>${rows}</tbody></table>`;
 
-    document.querySelectorAll('#ck-body button[data-cfg]').forEach(b => {
-      b.onclick = () => openTargetDialog(b.dataset.cfg);
+    document.querySelectorAll('#ck-body select[data-bind]').forEach(sel => {
+      sel.onchange = async () => {
+        const {ok, data} = await api('/api/machines/bind', {method: 'POST',
+          body: JSON.stringify({target: sel.dataset.bind, id: sel.value})});
+        if (!ok) alert(data.error || '绑定失败');
+        await loadMachines();
+        loadChecklist();
+      };
     });
     document.querySelectorAll('#ck-body button[data-run]').forEach(b => {
       b.onclick = async () => {
         const name = b.dataset.run;
         if (!confirm(`把当前候选产物送到已登记的机器上，以普通用户完整安装并验证 ${name}？\n验证完成后会自动清理现场。`)) return;
         const {ok, data} = await api('/api/targets/verify', {method: 'POST',
-          body: JSON.stringify({name, arch: $('#rel-arch').value})});
+          body: JSON.stringify({target: name, arch: $('#rel-arch').value})});
         $('#rel-msg').textContent = ok ? data.message : (data.error || '启动失败');
         if (ok) attachLog();
       };
