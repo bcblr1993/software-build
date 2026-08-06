@@ -223,3 +223,4 @@ overlay_files:
   - verify.sh
   - logs.sh
   - KEEPALIVED-USAGE.md
+  - FAQ.md

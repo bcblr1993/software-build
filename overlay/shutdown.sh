@@ -20,6 +20,11 @@
 
 # shellcheck disable=SC1007  # CDPATH= 是清空该变量的惯用法，非赋值笔误
 BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+# rabbitmqctl 同样要解析节点名中的主机部分。startup.sh 在主机名解析不出
+# 可用地址时会生成这个 inetrc，此处沿用，否则 ctl 连不上自己启动的节点。
+[ -f "$BASE_DIR/rabbitmq/etc/rabbitmq/inetrc" ] && \
+  export ERL_INETRC="$BASE_DIR/rabbitmq/etc/rabbitmq/inetrc"
 cd "$BASE_DIR" || exit 1
 
 usage() {

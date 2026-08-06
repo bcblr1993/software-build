@@ -185,6 +185,41 @@ restart_influxdb() {
   fi
 }
 
+# 确保 Erlang 能解析本机主机名。
+#
+# Erlang 启动节点（rabbit@主机名）时，必须把主机名解析成一个可连接的
+# 地址。若 /etc/hosts 中没有本机主机名，解析会落到 nsswitch 末尾的
+# myhostname 模块，返回 fe80:: 链路本地地址 —— 这类地址不带接口 scope
+# 无法绑定，epmd 因此起不来，RabbitMQ 随之启动失败。
+#
+# 现场实测：CentOS-7 那台主机名为 bogon，/etc/hosts 里没有对应条目，
+# getent 返回两个 fe80:: 地址，rabbitmq 完全无法启动。
+#
+# 现场只有普通用户，改不了 /etc/hosts。改用 Erlang 自己的 inetrc：
+# 把本机名钉到 127.0.0.1。它只作用于本包内的 Erlang，不触碰系统配置；
+# 也不改变节点名，因而既有的 mnesia 数据继续可用 —— 若改用
+# rabbit@localhost，节点名一变就找不到原来的数据了。
+ensure_erl_inetrc() {
+  local host inetrc
+  host="$(hostname 2>/dev/null)"
+  [ -n "$host" ] || return 0
+
+  # 已能解析出非链路本地的地址时不介入
+  if getent hosts "$host" 2>/dev/null | grep -qv '^fe80:'; then
+    return 0
+  fi
+
+  inetrc="$BASE_DIR/rabbitmq/etc/rabbitmq/inetrc"
+  mkdir -p "$(dirname "$inetrc")" 2>/dev/null
+  if printf '{host, {127,0,0,1}, ["%s", "localhost"]}.\n{lookup, [file, native]}.\n' \
+       "$host" > "$inetrc" 2>/dev/null; then
+    export ERL_INETRC="$inetrc"
+    echo "  主机名 $host 解析不到可用地址，已启用包内 inetrc 映射至 127.0.0.1"
+  else
+    echo "  警告：无法写入 $inetrc，若 rabbitmq 启动失败请检查主机名解析" >&2
+  fi
+}
+
 # 确认插件已启用。
 #
 # 插件配置就是一个纯文本文件，包内已随附并写好 [rabbitmq_management].。
@@ -213,6 +248,7 @@ ensure_plugins_enabled() {
 
 restart_rabbitmq() {
   echo "starting rabbitmq service, please..."
+  ensure_erl_inetrc
   ensure_plugins_enabled
   "$BASE_DIR/rabbitmq/sbin/rabbitmq-server" -detached || return 1
   local i

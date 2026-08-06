@@ -18,6 +18,11 @@ ERTS_DIR="$(find "$BASE_DIR/rabbitmq/lib" -maxdepth 1 -type d -name 'erts-*' 2>/
 export JAVA_HOME="$BASE_DIR/jdk"
 export PATH="$JAVA_HOME/bin${ERTS_DIR:+:$ERTS_DIR/bin}:$PATH"
 
+# rabbitmqctl 同样要解析节点名中的主机部分。startup.sh 在主机名解析不出
+# 可用地址时会生成这个 inetrc，此处沿用，否则 ctl 连不上自己启动的节点。
+[ -f "$BASE_DIR/rabbitmq/etc/rabbitmq/inetrc" ] && \
+  export ERL_INETRC="$BASE_DIR/rabbitmq/etc/rabbitmq/inetrc"
+
 # 不导出 LD_LIBRARY_PATH：它会被 curl 等系统命令继承，迫使它们加载
 # 随包的 OpenSSL 而崩溃（symbol ... not defined in file libssl.so.1.1）。
 # 各组件二进制已内置 $ORIGIN/../lib 的 rpath，可自行定位随包库。
