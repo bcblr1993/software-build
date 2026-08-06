@@ -95,6 +95,40 @@ class Checklist:
 
     # ── 汇总 ────────────────────────────────────────────────────────
 
+    def coverage_note(self, status: dict) -> str:
+        """如实说明本版本在哪些系统上验过、哪些没验。
+
+        强制发布时尤其要紧：跳过了哪几个系统必须白纸黑字写进发布说明，
+        否则几个月后没人说得清这个版本到底验到什么程度。
+        """
+        items = status.get("items") or []
+        done = [i for i in items if i["machine_checked"]]
+        skip = [i for i in items if not i["machine_checked"]]
+
+        # 用 target 而非 os_name：同一发行版的不同镜像 PRETTY_NAME 可能完全
+        # 一致（凝思 6.0.80 的两个镜像即如此），只写 os_name 会在发布说明里
+        # 出现两行看不出区别的条目。
+        def label(i: dict) -> str:
+            osn = i.get("os_name") or ""
+            extra = f"（{osn}）" if osn and osn != i["target"] else ""
+            glibc = f" glibc {i['glibc']}" if i.get("glibc") else ""
+            return f"{i['target']}{extra}{glibc}"
+
+        lines = []
+        if done:
+            lines.append(f"已在 {len(done)} 个目标系统的真实机器上验证通过：")
+            for i in done:
+                mark = f" — {i['machine_note']}" if i["machine_note"] else ""
+                lines.append(f"  · {label(i)}{mark}")
+        if skip:
+            lines.append("")
+            lines.append(f"以下 {len(skip)} 个系统未经真实机器验证，仅通过容器验证：")
+            for i in skip:
+                lines.append(f"  · {label(i)}")
+            lines.append("")
+            lines.append("上述系统请在部署前自行确认。")
+        return "\n".join(lines)
+
     def summarize(self, package: str, status: dict | None = None) -> str:
         """把勾选结果汇成一句测试说明，省去人工誊抄。
 

@@ -202,6 +202,8 @@
       </select>
       <span class="note" id="ck-pkg"></span>
       <span style="flex:1"></span>
+      <button id="ck-all-btn" style="font-size:12px;padding:4px 10px">全选</button>
+      <button id="ck-none-btn" style="font-size:12px;padding:4px 10px">全不选</button>
       <span id="ck-progress" class="tag">—</span>
     </div>
 
@@ -210,6 +212,7 @@
     <div class="row" style="margin-top:16px">
       <input type="text" id="rel-version" placeholder="版本号，如 v15" style="width:150px">
       <button class="primary" id="rel-btn" disabled>发布</button>
+      <button id="rel-force-btn" style="display:none">强制发布</button>
       <span class="note" id="rel-msg"></span>
     </div>
     <p class="note" id="ck-blocked" style="margin:8px 0 0"></p>
@@ -635,9 +638,54 @@ async function deleteArtifact(path) {
 
 // ── 实机验证清单 ──────────────────────────────────────────────────
 let ckState = null;
+let targetsCache = {};
+
+// 目标机登记：为每个目标系统绑定一台真实机器，之后可一键送包过去验证。
+// 口令存在构建机的 secrets/ 下（权限 600，已在 .gitignore 中），接口永不回显。
+function openTargetDialog(name) {
+  const t = targetsCache[name] || {};
+  const host = prompt(`【${name}】\n\n目标机地址（IP 或主机名）：`, t.host || '');
+  if (host === null) return;
+  const port = prompt('SSH 端口：', t.port || 22);
+  if (port === null) return;
+  const username = prompt('登录用户（通常 root，用于推送与切换身份）：', t.username || 'root');
+  if (username === null) return;
+  const password = prompt(
+    '登录口令：\n（留空表示沿用已保存的口令，仅修改其它项时可留空）', '');
+  if (password === null) return;
+  const runAs = prompt(
+    '验证时切换到的普通用户：\n现场只有普通用户，用 root 验证会得出与现场不符的结论',
+    t.run_as || 'sprixin');
+  if (runAs === null) return;
+
+  api('/api/targets/save', {method: 'POST', body: JSON.stringify({
+    name, host: host.trim(), port: parseInt(port, 10) || 22,
+    username: username.trim(), password, run_as: runAs.trim(),
+  })}).then(async ({ok, data}) => {
+    if (!ok) { alert(data.error || '保存失败'); return; }
+    await loadTargets();
+    const r = await api('/api/targets/check', {method: 'POST', body: JSON.stringify({name})});
+    if (r.ok) {
+      const i = r.data.info || {};
+      const w = (r.data.warnings || []);
+      alert(`连接成功\n\n系统：${i.os || '?'}\n架构：${i.arch || '?'}  glibc ${i.glibc || '?'}\n` +
+            `主机名：${i.hostname || '?'}\n验证身份：${runAs}（${i.runas === 'yes' ? '存在' : '不存在'}）\n` +
+            (w.length ? `\n需注意：\n${w.map(x => '· ' + x).join('\n')}` : '\n一切就绪'));
+    } else {
+      alert(`已保存，但连接测试失败：\n${r.data.error || '未知原因'}`);
+    }
+    loadChecklist();
+  });
+}
+
+async function loadTargets() {
+  const {ok, data} = await api('/api/targets');
+  targetsCache = (ok && data.targets) ? data.targets : {};
+}
 
 async function loadChecklist() {
   const arch = $('#rel-arch').value;
+  await loadTargets();
   const {ok, data} = await api(`/api/checklist?arch=${encodeURIComponent(arch)}`);
   if (!ok) { $('#ck-body').innerHTML = '<p class="note">无法读取验证清单</p>'; return; }
   ckState = data;
@@ -665,59 +713,124 @@ async function loadChecklist() {
       const done = i.machine_checked
         ? `<span class="note">${i.machine_at}${i.machine_by ? ' · ' + i.machine_by : ''}</span>`
         : '<span class="note">待实机验证</span>';
+      // 主标题用 target：同一发行版的不同镜像 PRETTY_NAME 可能完全相同
+      // （凝思 6.0.80 的两个镜像即如此），只显示 os_name 会看起来像重复项。
+      const sub = (i.os_name && i.os_name !== i.target) ? i.os_name : '';
+      const tg = targetsCache[i.target];
+      const sshCell = tg && tg.configured
+        ? `<span class="note">${tg.username}@${tg.host}</span>`
+        : '<span class="note">未配置</span>';
       return `<tr>
         <td style="width:34px">${cbox}</td>
-        <td><strong>${i.os_name}</strong>${i.glibc ? ` <span class="note">glibc ${i.glibc}</span>` : ''}</td>
-        <td style="width:22%">${cont}</td>
-        <td style="width:24%">${done}</td>
-        <td style="width:22%"><input type="text" data-note="${i.target}"
-            value="${(i.machine_note || '').replace(/"/g, '&quot;')}"
-            placeholder="机器/IP" style="font-size:12px;padding:4px 8px"></td>
+        <td><strong>${i.target}</strong>
+            ${i.glibc ? ` <span class="note">glibc ${i.glibc}</span>` : ''}
+            ${sub ? `<div class="note">${sub}</div>` : ''}</td>
+        <td style="width:15%">${cont}</td>
+        <td style="width:19%">${done}</td>
+        <td style="width:16%">${sshCell}</td>
+        <td style="width:19%" class="row" style="gap:4px">
+          <button data-cfg="${i.target}" style="font-size:12px;padding:3px 8px">配置</button>
+          <button data-run="${i.target}" style="font-size:12px;padding:3px 8px"
+                  ${tg && tg.configured ? '' : 'disabled'}>自动验证</button>
+        </td>
       </tr>`;
     }).join('');
     $('#ck-body').innerHTML = `<table><thead><tr>
-        <th></th><th>目标系统</th><th>自动验证</th><th>实机确认</th><th>备注</th>
+        <th></th><th>目标系统</th><th>自动验证</th><th>实机确认</th><th>目标机</th><th></th>
       </tr></thead><tbody>${rows}</tbody></table>`;
+
+    document.querySelectorAll('#ck-body button[data-cfg]').forEach(b => {
+      b.onclick = () => openTargetDialog(b.dataset.cfg);
+    });
+    document.querySelectorAll('#ck-body button[data-run]').forEach(b => {
+      b.onclick = async () => {
+        const name = b.dataset.run;
+        if (!confirm(`把当前候选产物送到已登记的机器上，以普通用户完整安装并验证 ${name}？\n验证完成后会自动清理现场。`)) return;
+        const {ok, data} = await api('/api/targets/verify', {method: 'POST',
+          body: JSON.stringify({name, arch: $('#rel-arch').value})});
+        $('#rel-msg').textContent = ok ? data.message : (data.error || '启动失败');
+        if (ok) attachLog();
+      };
+    });
 
     document.querySelectorAll('#ck-body input[type=checkbox]').forEach(cb => {
       cb.onchange = async () => {
-        const target = cb.dataset.t;
-        const note = document.querySelector(`#ck-body input[data-note="${target}"]`);
-        await api('/api/checklist/mark', {method: 'POST', body: JSON.stringify({
-          arch: $('#rel-arch').value, package: ckState.package,
-          target, passed: cb.checked, note: note ? note.value.trim() : '',
-        })});
+        await markOne(cb.dataset.t, cb.checked);
         loadChecklist();
       };
     });
   }
 
   $('#rel-btn').disabled = !data.releasable;
+  // 强制发布只在「确有系统未经实机验证」时出现；容器验证失败的场合
+  // 不给这个出口 —— 那不是来不及验，而是验过且没通过。
+  $('#rel-force-btn').style.display =
+    (!data.releasable && (data.pending || []).length && !(data.failed || []).length)
+      ? '' : 'none';
   $('#ck-blocked').textContent = data.releasable
     ? '已达到发布标准' : (data.blocked_reason || '');
   $('#ck-blocked').style.color = data.releasable ? 'var(--ok)' : 'var(--muted)';
 }
 
+async function markOne(target, passed) {
+  return api('/api/checklist/mark', {method: 'POST', body: JSON.stringify({
+    arch: $('#rel-arch').value, package: ckState.package, target, passed,
+  })});
+}
+
+$('#ck-all-btn').onclick = async () => {
+  if (!ckState || !ckState.items) return;
+  const todo = ckState.items.filter(i => !i.machine_checked && i.container_passed !== false);
+  if (!todo.length) return;
+  if (!confirm(`把 ${todo.length} 个系统一并标记为已实机验证？\n请确认这些系统确实都在真实机器上装过、跑过。`)) return;
+  for (const i of todo) await markOne(i.target, true);
+  loadChecklist();
+};
+
+$('#ck-none-btn').onclick = async () => {
+  if (!ckState || !ckState.items) return;
+  const done = ckState.items.filter(i => i.machine_checked);
+  if (!done.length) return;
+  if (!confirm(`取消 ${done.length} 个系统的实机验证标记？`)) return;
+  for (const i of done) await markOne(i.target, false);
+  loadChecklist();
+};
+
 $('#rel-arch').onchange = loadChecklist;
 
-$('#rel-btn').onclick = async () => {
+async function doRelease(force) {
   const arch = $('#rel-arch').value;
   const version = $('#rel-version').value.trim();
   if (!version) { $('#rel-msg').textContent = '请填写版本号'; return; }
-  if (!confirm(`确定把 ${arch} 发布为 ${version}？正式版本发布后不可删除。`)) return;
+
+  if (force) {
+    const pending = (ckState && ckState.pending) || [];
+    const msg = `强制发布 ${version}（${arch}）\n\n`
+      + `以下 ${pending.length} 个系统未经真实机器验证：\n`
+      + pending.map(p => '· ' + p).join('\n')
+      + `\n\n这些系统只通过了容器验证。发布说明中会如实标注，`
+      + `已验证与未验证的系统会分别列出。\n\n确定继续？`;
+    if (!confirm(msg)) return;
+  } else if (!confirm(`确定把 ${arch} 发布为 ${version}？正式版本发布后不可删除。`)) {
+    return;
+  }
 
   $('#rel-btn').disabled = true;
+  $('#rel-force-btn').disabled = true;
   $('#rel-msg').textContent = '正在发布…';
-  // 测试说明由清单自动汇总，无需人工填写
+  // 测试说明由清单如实汇总：验过哪些、跳过哪些都写进去
   const {ok, data} = await api('/api/release',
-    {method: 'POST', body: JSON.stringify({arch, version})});
+    {method: 'POST', body: JSON.stringify({arch, version, force: !!force})});
   $('#rel-msg').textContent = ok
     ? `${data.message}　sha256 ${data.sha256.slice(0,16)}…`
     : (data.error || '发布失败');
-  $('#rel-btn').disabled = false;
+  $('#rel-force-btn').disabled = false;
   loadReleases();
   loadChecklist();
-};
+}
+
+$('#rel-btn').onclick = () => doRelease(false);
+$('#rel-force-btn').onclick = () => doRelease(true);
 
 async function loadHistory() {
   const {ok, data} = await api('/api/history');

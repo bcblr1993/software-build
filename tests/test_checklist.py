@@ -211,3 +211,36 @@ class RenameForVersion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForcePublishCoverage(Base):
+    """强制发布时，发布说明必须如实交代哪些验了、哪些没验。"""
+
+    def test_coverage_note_lists_both_sides(self):
+        self._container("x86_64", self._rows(3))
+        c = Checklist(self.ws)
+        c.mark(PKG, "os-0", passed=True, note="lab-host-1")
+        st = c.status("x86_64", PKG)
+        note = c.coverage_note(st)
+        self.assertIn("1 个目标系统的真实机器上验证通过", note)
+        self.assertIn("lab-host-1", note)
+        self.assertIn("2 个系统未经真实机器验证", note)
+        self.assertIn("os-1", note)
+        self.assertIn("os-2", note)
+
+    def test_coverage_note_when_all_verified(self):
+        self._container("x86_64", self._rows(2))
+        c = Checklist(self.ws)
+        c.mark(PKG, "os-0", passed=True)
+        c.mark(PKG, "os-1", passed=True)
+        note = c.coverage_note(c.status("x86_64", PKG))
+        self.assertIn("2 个目标系统", note)
+        self.assertNotIn("未经真实机器验证", note)
+
+    def test_pending_list_drives_force_prompt(self):
+        self._container("x86_64", self._rows(4))
+        c = Checklist(self.ws)
+        c.mark(PKG, "os-0", passed=True)
+        st = c.status("x86_64", PKG)
+        self.assertEqual(sorted(st["pending"]), ["os-1", "os-2", "os-3"])
+        self.assertFalse(st["releasable"])

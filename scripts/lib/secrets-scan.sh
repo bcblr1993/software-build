@@ -50,7 +50,18 @@ for f in "${files[@]}"; do
   while IFS=: read -r ln text; do
     [ -n "${ln:-}" ] || continue
     report "$f:$ln 疑似明文口令" "$(printf '%.60s' "$text")"
-  done < <(grep -nEi '(password|passwd|requirepass|secret[_-]?key|api[_-]?key|token)[[:space:]]*[:=][[:space:]]*[^[:space:]"'"'"'{}$<]{6,}' "$f" 2>/dev/null | grep -viE '(example|placeholder|changeme|your[_-]|xxx|\*\*\*|\$\{|<.*>)' | head -3)
+  # 排除函数调用与变量引用形式的赋值：password=body.get("password")、
+  # const password = prompt(...) 之类是读取口令的代码，而非口令本身。
+  # 真正的明文（password=Sprixin!@#301162）不长这样，仍会被抓住。
+  done < <(grep -nEi '(password|passwd|requirepass|secret[_-]?key|api[_-]?key|token)[[:space:]]*[:=][[:space:]]*[^[:space:]"'"'"'{}$<]{6,}' "$f" 2>/dev/null | grep -viE '(example|placeholder|changeme|your[_-]|xxx|\*\*\*|\$\{|<.*>)' | grep -vE '[:=][[:space:]]*[A-Za-z_][A-Za-z0-9_.]*\(' | head -3)
+
+  # 1b. 空格分隔的配置指令：redis.conf 的 requirepass、
+  #     rabbitmq 的 default_pass 等。它们不带 : 或 =，上一条规则抓不到，
+  #     而安装包里的 redis.conf 恰恰就是这个格式且带着真实口令。
+  while IFS=: read -r ln text; do
+    [ -n "${ln:-}" ] || continue
+    report "$f:$ln 疑似明文口令" "$(printf '%.60s' "$text")"
+  done < <(grep -nEi '^[[:space:]]*(requirepass|masterauth|default_pass|default_user)[[:space:]]+[^[:space:]#]{4,}' "$f" 2>/dev/null | grep -viE '(example|placeholder|changeme|your[_-]|xxx|\*\*\*|\$\{|<.*>|foobared)' | head -3)
 
   # 2. 私钥
   if grep -qE '^-+BEGIN [A-Z ]*PRIVATE KEY' "$f" 2>/dev/null; then

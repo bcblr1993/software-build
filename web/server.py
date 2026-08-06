@@ -130,6 +130,66 @@ class BuildRunner:
             "verify": "验证已启动",
         }[action]
 
+    def start_remote_verify(self, *, target, package, arch: str, operator: str,
+                            script) -> tuple[bool, str]:
+        """在真实机器上跑一遍验证，通过后自动勾上清单。
+
+        与构建共用同一把锁：两者都要独占目标机与网络带宽，并发跑只会
+        互相拖慢，日志也会交织成一团。
+        """
+        with self._lock:
+            if self.busy:
+                return False, "已有任务在进行中"
+            self._history = []
+            self._current = {
+                "action": "remote-verify", "arch": arch,
+                "components": [target.name], "operator": operator,
+                "parallel": "serial", "started_at": time.time(),
+            }
+        threading.Thread(
+            target=self._run_remote_verify,
+            args=(target, package, arch, operator, script),
+            daemon=True,
+        ).start()
+        return True, f"已开始在 {target.host} 上验证 {target.name}"
+
+    def _run_remote_verify(self, target, package, arch, operator, script) -> None:
+        from sprixin_build.checklist import Checklist
+        from sprixin_build.targets import TargetError, run_verify
+
+        rc = 1
+        try:
+            self._emit(f"目标系统 : {target.name}")
+            self._emit(f"目标机器 : {target.username}@{target.host}:{target.port}")
+            self._emit(f"运行身份 : {target.run_as}（与现场一致，非 root）")
+            self._emit(f"安装包   : {package.name}")
+            self._emit("")
+            result = run_verify(target, package, script, log=self._emit)
+            for line in (result["output"] or "").splitlines():
+                self._emit(line)
+            if result["passed"]:
+                # 验证通过即代表这台真机确认过了，自动勾上，免去人工再点一次
+                Checklist(self.workspace).mark(
+                    package.name, target.name, passed=True,
+                    operator=operator,
+                    note=f"{target.host}（自动验证）",
+                )
+                self._emit("")
+                self._emit(f"✓ {target.name} 实机验证通过，已在清单中勾选")
+                rc = 0
+            else:
+                self._emit("")
+                self._emit(f"✗ {target.name} 实机验证未通过，清单未勾选")
+                if result["stderr"]:
+                    self._emit(result["stderr"][-800:])
+        except TargetError as exc:
+            self._emit(f"验证失败：{exc}")
+        except Exception as exc:  # noqa: BLE001
+            self._emit(f"验证过程异常：{exc}")
+        finally:
+            self._emit(f"__DONE__ {rc}")
+            self._current = None
+
     def _build_command(self, action: str, arch: str, components: list[str]) -> list[str]:
         if action == "verify":
             # 取该架构最近产出的安装包
@@ -301,6 +361,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/checklist":
             return self._api_checklist()
 
+        if route == "/api/targets":
+            return self._api_targets()
+
         if route == "/api/download-link":
             if self._require_auth() is None:
                 return
@@ -337,6 +400,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_member_remove(body)
         if route == "/api/checklist/mark":
             return self._api_checklist_mark(body)
+        if route == "/api/targets/save":
+            return self._api_target_save(body)
+        if route == "/api/targets/delete":
+            return self._api_target_delete(body)
+        if route == "/api/targets/check":
+            return self._api_target_check(body)
+        if route == "/api/targets/verify":
+            subject = self._require_auth()
+            if subject is None:
+                return
+            return self._api_target_verify(body, subject)
 
         if route == "/api/components":
             if self._require_auth() is None:
@@ -820,6 +894,89 @@ class Handler(BaseHTTPRequestHandler):
         arch = str(body.get("arch") or "x86_64").strip()
         self._send_json({"ok": True, "status": self._checklist().status(arch, pkg)})
 
+    # ── 目标机登记与远程实机验证 ────────────────────────────────────
+
+    def _target_store(self):
+        from sprixin_build.targets import TargetStore
+
+        return TargetStore(Path(self.server.workspace) / "secrets")
+
+    def _api_targets(self) -> None:
+        if self._require_auth() is None:
+            return
+        # 只返回脱敏信息：口令永不回显
+        store = self._target_store()
+        self._send_json({
+            "targets": {n: t.redacted() for n, t in store.all().items() if t}
+        })
+
+    def _api_target_save(self, body: dict) -> None:
+        if self._require_auth() is None:
+            return
+        from sprixin_build.targets import Target, TargetError
+
+        try:
+            t = Target(
+                name=str(body.get("name") or "").strip(),
+                host=str(body.get("host") or "").strip(),
+                port=int(body.get("port") or 22),
+                username=str(body.get("username") or "root").strip(),
+                password=str(body.get("password") or ""),
+                run_as=str(body.get("run_as") or "sprixin").strip(),
+                note=str(body.get("note") or "").strip(),
+            )
+            self._target_store().put(t)
+        except (TargetError, ValueError) as exc:
+            return self._send_json({"error": str(exc)}, 400)
+        self._send_json({"ok": True})
+
+    def _api_target_delete(self, body: dict) -> None:
+        if self._require_auth() is None:
+            return
+        from sprixin_build.targets import TargetError
+
+        try:
+            self._target_store().delete(str(body.get("name") or ""))
+        except TargetError as exc:
+            return self._send_json({"error": str(exc)}, 404)
+        self._send_json({"ok": True})
+
+    def _api_target_check(self, body: dict) -> None:
+        if self._require_auth() is None:
+            return
+        from sprixin_build.targets import TargetError, check
+
+        t = self._target_store().get(str(body.get("name") or ""))
+        if t is None:
+            return self._send_json({"error": "尚未登记该目标机"}, 404)
+        try:
+            self._send_json(check(t))
+        except TargetError as exc:
+            return self._send_json({"error": str(exc)}, 502)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": f"探测失败: {exc}"}, 502)
+
+    def _api_target_verify(self, body: dict, subject: str) -> None:
+        """把包送到目标机跑一遍完整验证，通过则自动勾上清单。"""
+        from sprixin_build.targets import TargetError, run_verify
+
+        name = str(body.get("name") or "").strip()
+        arch = str(body.get("arch") or "x86_64").strip()
+        t = self._target_store().get(name)
+        if t is None:
+            return self._send_json({"error": "尚未登记该目标机"}, 404)
+
+        pkg = body.get("package")
+        target_pkg = Path(pkg) if pkg else self._latest_artifact(arch)
+        if target_pkg is None or not target_pkg.is_file():
+            return self._send_json({"error": f"{arch} 尚无可用的候选产物"}, 404)
+
+        ok, msg = self.server.runner.start_remote_verify(
+            target=t, package=target_pkg, arch=arch, operator=subject,
+            script=REPO_ROOT / "compat" / "realmachine-verify.sh",
+        )
+        self._send_json({"ok": ok, "message": msg}, 200 if ok else 409)
+
     def _api_release(self, body: dict, subject: str) -> None:
         """把候选产物提升为正式版本。
 
@@ -842,16 +999,34 @@ class Handler(BaseHTTPRequestHandler):
         if target is None:
             return self._send_json({"error": f"{arch} 尚无候选产物"}, 409)
 
-        st = self._checklist().status(arch, target.name)
-        if not st["releasable"]:
+        ck = self._checklist()
+        st = ck.status(arch, target.name)
+        force = bool(body.get("force"))
+
+        # 容器验证失败的系统，强制也不放行 —— 那不是"来不及验"，
+        # 而是"验过且没通过"，两者性质不同。
+        if st["failed"]:
             return self._send_json({
-                "error": f"尚未达到发布标准：{st['blocked_reason']}",
+                "error": f"存在容器验证未通过的系统，不可发布：{'、'.join(st['failed'])}",
                 "checklist": st,
             }, 409)
 
-        # 测试说明未填时，用清单自动汇总一句，省得人工誊抄
-        if not note:
-            note = self._checklist().summarize(target.name, st)
+        if not st["releasable"] and not force:
+            return self._send_json({
+                "error": f"尚未达到发布标准：{st['blocked_reason']}",
+                "checklist": st, "can_force": True,
+            }, 409)
+
+        # 测试说明由清单如实汇总：验过哪些、跳过哪些，都写进去
+        coverage = ck.coverage_note(st)
+        if note:
+            note = f"{note}\n\n{coverage}" if coverage else note
+        else:
+            note = coverage
+        if force and st["pending"]:
+            note = (
+                f"【强制发布】{len(st['pending'])} 个系统未经真实机器验证。\n\n{note}"
+            )
 
         try:
             result = self._release_manager().publish(
