@@ -298,6 +298,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/members":
             return self._api_members()
 
+        if route == "/api/checklist":
+            return self._api_checklist()
+
         if route == "/api/download-link":
             if self._require_auth() is None:
                 return
@@ -332,6 +335,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_logout()
         if route == "/api/members/remove":
             return self._api_member_remove(body)
+        if route == "/api/checklist/mark":
+            return self._api_checklist_mark(body)
 
         if route == "/api/components":
             if self._require_auth() is None:
@@ -766,6 +771,55 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": str(exc)}, 500)
         self._send_json({"artifacts": items})
 
+    def _checklist(self):
+        from sprixin_build.checklist import Checklist
+
+        return Checklist(Path(self.server.workspace))
+
+    def _latest_artifact(self, arch: str) -> Path | None:
+        dist = Path(self.server.workspace) / "dist" / arch
+        pkgs = sorted(
+            dist.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True
+        ) if dist.is_dir() else []
+        return pkgs[0] if pkgs else None
+
+    def _api_checklist(self) -> None:
+        """某个候选产物的验证清单与发布资格。"""
+        if self._require_auth() is None:
+            return
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        arch = (params.get("arch") or ["x86_64"])[0].strip()
+        pkg = (params.get("package") or [""])[0].strip()
+
+        if not pkg:
+            latest = self._latest_artifact(arch)
+            if latest is None:
+                return self._send_json({
+                    "arch": arch, "items": [], "total": 0, "releasable": False,
+                    "blocked_reason": f"{arch} 尚无候选产物",
+                })
+            pkg = latest.name
+
+        self._send_json(self._checklist().status(arch, pkg))
+
+    def _api_checklist_mark(self, body: dict) -> None:
+        operator = self._require_auth()
+        if operator is None:
+            return
+        pkg = str(body.get("package") or "").strip()
+        target = str(body.get("target") or "").strip()
+        if not pkg or not target:
+            return self._send_json({"error": "需指定产物与目标系统"}, 400)
+
+        self._checklist().mark(
+            pkg, target,
+            passed=bool(body.get("passed", True)),
+            operator=operator,
+            note=str(body.get("note") or ""),
+        )
+        arch = str(body.get("arch") or "x86_64").strip()
+        self._send_json({"ok": True, "status": self._checklist().status(arch, pkg)})
+
     def _api_release(self, body: dict, subject: str) -> None:
         """把候选产物提升为正式版本。
 
@@ -782,11 +836,28 @@ class Handler(BaseHTTPRequestHandler):
         if not arch or not version:
             return self._send_json({"error": "需指定架构与版本号"}, 400)
 
+        # 发布门槛：清单上每个系统都须经真机确认。这一关在服务端把，
+        # 而不只靠界面把按钮置灰 —— 前端的禁用状态绕过去太容易了。
+        target = Path(artifact) if artifact else self._latest_artifact(arch)
+        if target is None:
+            return self._send_json({"error": f"{arch} 尚无候选产物"}, 409)
+
+        st = self._checklist().status(arch, target.name)
+        if not st["releasable"]:
+            return self._send_json({
+                "error": f"尚未达到发布标准：{st['blocked_reason']}",
+                "checklist": st,
+            }, 409)
+
+        # 测试说明未填时，用清单自动汇总一句，省得人工誊抄
+        if not note:
+            note = self._checklist().summarize(target.name, st)
+
         try:
             result = self._release_manager().publish(
                 arch=arch,
                 version=version,
-                artifact=Path(artifact) if artifact else None,
+                artifact=target,
                 released_by=subject,
                 test_note=note,
             )
@@ -1019,6 +1090,7 @@ def main() -> int:
     secrets_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    httpd.workspace = workspace
     httpd.auth = Authenticator(secrets_dir / "auth.json")
     httpd.store = BuildStore(workspace / "builds.db")
     httpd.runner = BuildRunner(REPO_ROOT, workspace, httpd.store)

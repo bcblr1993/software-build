@@ -192,18 +192,27 @@
 
   <div class="card">
     <h2>发布正式版本</h2>
-    <p class="sub">构建通过不等于可以发布。产物需先在实机上验证，确认无误后再提升为正式版本。
-      正式版本一经发布即不可删除，并自动生成发布说明与变更记录。</p>
-    <div class="row">
+    <p class="sub">每个目标系统都要在真实机器上装一遍、跑一遍，逐台确认后勾选。
+      全部勾完才达到发布标准。正式版本一经发布即不可删除，并自动生成发布说明与变更记录。</p>
+
+    <div class="row" style="margin-bottom:14px">
       <select id="rel-arch">
         <option value="x86_64">x86_64</option>
         <option value="aarch64">aarch64</option>
       </select>
-      <input type="text" id="rel-version" placeholder="版本号，如 v14" style="width:140px">
-      <input type="text" id="rel-note" placeholder="实机测试说明（写清在哪台机器、测了什么）" style="flex:1">
-      <button class="primary" id="rel-btn">发布</button>
+      <span class="note" id="ck-pkg"></span>
+      <span style="flex:1"></span>
+      <span id="ck-progress" class="tag">—</span>
     </div>
-    <p class="note" id="rel-msg" style="margin:10px 0 0"></p>
+
+    <div id="ck-body"><p class="note">加载中…</p></div>
+
+    <div class="row" style="margin-top:16px">
+      <input type="text" id="rel-version" placeholder="版本号，如 v15" style="width:150px">
+      <button class="primary" id="rel-btn" disabled>发布</button>
+      <span class="note" id="rel-msg"></span>
+    </div>
+    <p class="note" id="ck-blocked" style="margin:8px 0 0"></p>
 
     <div style="margin-top:18px">
       <p style="font-size:13px;font-weight:500;margin:0 0 8px">已发布的正式版本</p>
@@ -277,6 +286,7 @@ async function refreshStatus() {
     loadCapacity();
     loadReleases();
     loadMembers();
+    loadChecklist();
     if (data.busy) attachLog();
   } else {
     $('#gate').classList.remove('hide');
@@ -623,22 +633,90 @@ async function deleteArtifact(path) {
   loadReleases();
 }
 
+// ── 实机验证清单 ──────────────────────────────────────────────────
+let ckState = null;
+
+async function loadChecklist() {
+  const arch = $('#rel-arch').value;
+  const {ok, data} = await api(`/api/checklist?arch=${encodeURIComponent(arch)}`);
+  if (!ok) { $('#ck-body').innerHTML = '<p class="note">无法读取验证清单</p>'; return; }
+  ckState = data;
+
+  $('#ck-pkg').textContent = data.package || '';
+  $('#ck-progress').textContent = data.total
+    ? `已实机验证 ${data.machine_checked} / ${data.total}`
+    : '—';
+  $('#ck-progress').className = 'tag' + (data.releasable ? ' ok'
+    : data.machine_checked ? ' warn' : '');
+
+  if (!data.items || !data.items.length) {
+    $('#ck-body').innerHTML =
+      `<p class="note">${data.blocked_reason || '尚无可验证的系统'}</p>`;
+  } else {
+    const rows = data.items.map(i => {
+      const cbox = `<input type="checkbox" data-t="${i.target}"
+                     ${i.machine_checked ? 'checked' : ''}
+                     ${i.container_passed === false ? 'disabled' : ''}>`;
+      const cont = i.container_passed === false
+        ? '<span class="tag bad">容器验证失败</span>'
+        : i.container_passed === null
+          ? '<span class="note">仅实机</span>'
+          : '<span class="tag ok">容器已过</span>';
+      const done = i.machine_checked
+        ? `<span class="note">${i.machine_at}${i.machine_by ? ' · ' + i.machine_by : ''}</span>`
+        : '<span class="note">待实机验证</span>';
+      return `<tr>
+        <td style="width:34px">${cbox}</td>
+        <td><strong>${i.os_name}</strong>${i.glibc ? ` <span class="note">glibc ${i.glibc}</span>` : ''}</td>
+        <td style="width:22%">${cont}</td>
+        <td style="width:24%">${done}</td>
+        <td style="width:22%"><input type="text" data-note="${i.target}"
+            value="${(i.machine_note || '').replace(/"/g, '&quot;')}"
+            placeholder="机器/IP" style="font-size:12px;padding:4px 8px"></td>
+      </tr>`;
+    }).join('');
+    $('#ck-body').innerHTML = `<table><thead><tr>
+        <th></th><th>目标系统</th><th>自动验证</th><th>实机确认</th><th>备注</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+
+    document.querySelectorAll('#ck-body input[type=checkbox]').forEach(cb => {
+      cb.onchange = async () => {
+        const target = cb.dataset.t;
+        const note = document.querySelector(`#ck-body input[data-note="${target}"]`);
+        await api('/api/checklist/mark', {method: 'POST', body: JSON.stringify({
+          arch: $('#rel-arch').value, package: ckState.package,
+          target, passed: cb.checked, note: note ? note.value.trim() : '',
+        })});
+        loadChecklist();
+      };
+    });
+  }
+
+  $('#rel-btn').disabled = !data.releasable;
+  $('#ck-blocked').textContent = data.releasable
+    ? '已达到发布标准' : (data.blocked_reason || '');
+  $('#ck-blocked').style.color = data.releasable ? 'var(--ok)' : 'var(--muted)';
+}
+
+$('#rel-arch').onchange = loadChecklist;
+
 $('#rel-btn').onclick = async () => {
   const arch = $('#rel-arch').value;
   const version = $('#rel-version').value.trim();
-  const note = $('#rel-note').value.trim();
   if (!version) { $('#rel-msg').textContent = '请填写版本号'; return; }
-  if (!note && !confirm('未填写实机测试说明，仍要发布吗？')) return;
+  if (!confirm(`确定把 ${arch} 发布为 ${version}？正式版本发布后不可删除。`)) return;
 
   $('#rel-btn').disabled = true;
   $('#rel-msg').textContent = '正在发布…';
+  // 测试说明由清单自动汇总，无需人工填写
   const {ok, data} = await api('/api/release',
-    {method: 'POST', body: JSON.stringify({arch, version, test_note: note})});
+    {method: 'POST', body: JSON.stringify({arch, version})});
   $('#rel-msg').textContent = ok
     ? `${data.message}　sha256 ${data.sha256.slice(0,16)}…`
     : (data.error || '发布失败');
   $('#rel-btn').disabled = false;
   loadReleases();
+  loadChecklist();
 };
 
 async function loadHistory() {

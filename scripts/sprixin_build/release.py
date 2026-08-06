@@ -79,22 +79,41 @@ class ReleaseManager:
 
         target_dir = self.releases_dir / version
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / artifact.name
+
+        # 包名随发布版本号走：候选产物名里带的是打包当时的版本，发布成
+        # 别的版本号而文件名不改，日后拿到手里对不上账。重命名不触碰内容，
+        # 校验和照旧。
+        target = target_dir / rename_for_version(artifact.name, version)
 
         if target.exists():
             raise ReleaseError(f"目标已存在: {target}")
 
-        self.log(f"发布 {artifact.name} → {target}")
+        if target.name != artifact.name:
+            self.log(f"发布 {artifact.name} → {target.name}（按版本号重命名）")
+        else:
+            self.log(f"发布 {artifact.name} → {target}")
         shutil.copy2(artifact, target)
 
         digest = sha256_path(target)
         size = target.stat().st_size
 
-        # 一并保存同目录下的校验和清单与构建报告，便于日后追溯
+        # 一并保存同目录下的校验和清单与构建报告，便于日后追溯。
+        # 归档若已改名，清单里的文件名须同步替换，否则拿它去核对会扑空。
         for extra in ("SHA256SUMS",):
             src = artifact.parent / extra
-            if src.is_file():
-                shutil.copy2(src, target_dir / f"{extra}-{arch}")
+            if not src.is_file():
+                continue
+            dest = target_dir / f"{extra}-{arch}"
+            if target.name != artifact.name:
+                try:
+                    text = src.read_text(encoding="utf-8")
+                    dest.write_text(
+                        text.replace(artifact.name, target.name), encoding="utf-8"
+                    )
+                    continue
+                except OSError:
+                    pass
+            shutil.copy2(src, dest)
         for report in artifact.parent.glob("REPORT-*.md"):
             shutil.copy2(report, target_dir / report.name)
 
@@ -355,6 +374,34 @@ class ReleaseManager:
 #
 # 发布说明与变更记录由机器生成而非人工补写：内容全部来自包本身与数据库，
 # 既不会漏项，也不会与实际产物脱节。
+
+def rename_for_version(filename: str, version: str) -> str:
+    """把归档名中的版本段换成发布时选定的版本号。
+
+    候选产物名里带的是打包当时的版本（package.version），而发布可以选用
+    另一个版本号。若不改名，就会出现 releases/v15/ 里躺着一个名为 v14 的
+    包 —— 拿到现场对不上账。
+
+    仅替换版本段，包名、架构、日期与扩展名原样保留；认不出格式时不动，
+    宁可保持原名也不要猜错。
+    """
+    version = (version or "").strip()
+    if not version:
+        return filename
+
+    # sprixinSoft-x86_64-v14-2026-08-06.tar.gz
+    #             └架构┘ └版本┘ └──日期──┘
+    m = re.match(
+        r"^(?P<head>.+?)-(?P<ver>v?[0-9][\w.]*)-(?P<date>\d{4}-\d{2}-\d{2})"
+        r"(?P<ext>\.tar\.(?:gz|xz)|\.tgz)$",
+        filename,
+    )
+    if not m:
+        return filename
+    if m.group("ver") == version:
+        return filename
+    return f"{m.group('head')}-{version}-{m.group('date')}{m.group('ext')}"
+
 
 def read_components(package: Path) -> dict[str, str]:
     """从安装包中读出组件与版本。
