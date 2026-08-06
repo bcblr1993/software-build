@@ -191,5 +191,48 @@ class Enrollment(Base):
             a.begin_enrollment("   ")
 
 
+
+class SingleMemberConvenience(Base):
+    """只有一位成员时，用户名可省。
+
+    这条容错是为尚未刷新的旧页面留的：登录框加用户名那次改动上线后，
+    浏览器缓存的旧页面提交时不带用户名，后端认不出是谁，表现得就像
+    密码错了。加入第二人后此路不通，必须指名道姓。
+    """
+
+    def test_name_optional_when_single_member(self):
+        a = self._auth()
+        s = self._enroll(a, "chenxu")
+        ok, _ = a.verify(_code_for(s))          # 不传 account
+        self.assertTrue(ok)
+
+    def test_name_required_once_second_member_exists(self):
+        a = self._auth()
+        s1 = self._enroll(a, "chenxu")
+        self._enroll(a, "zhangsan")
+        ok, _ = a.verify(_code_for(s1))          # 不传 account
+        self.assertFalse(ok, "有多位成员时不应再猜测身份")
+
+    def test_sole_member_name_resolves_identity(self):
+        """省略用户名登录时，身份要能补全 —— 否则审计记录一片空白。"""
+        a = self._auth()
+        self._enroll(a, "chenxu")
+        self.assertEqual(a.sole_member_name(), "chenxu")
+
+    def test_sole_member_name_empty_when_ambiguous(self):
+        a = self._auth()
+        self._enroll(a, "chenxu")
+        self._enroll(a, "zhangsan")
+        self.assertEqual(a.sole_member_name(), "")
+
+    def test_unbound_second_member_does_not_break_shortcut(self):
+        """已生成密钥但尚未完成绑定的人，不算作成员。"""
+        a = self._auth()
+        s = self._enroll(a, "chenxu")
+        a.begin_enrollment("pending")            # 只取密钥，不确认
+        ok, _ = a.verify(_code_for(s))
+        self.assertTrue(ok)
+
+
 if __name__ == "__main__":
     unittest.main()

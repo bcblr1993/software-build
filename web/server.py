@@ -412,6 +412,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api_login(self, body: dict) -> None:
         auth = self.server.auth
         name = str(body.get("name") or "").strip()
+        # 省略用户名时（只有一位成员的场合允许）把身份补全，否则会话将以
+        # 空名义签发，发布记录里的操作者就成了一片空白。
+        if not name:
+            name = auth.sole_member_name()
         ok, msg = auth.verify(str(body.get("code", "")), account=name)
         if not ok:
             return self._send_json({"error": msg}, 401)
@@ -994,6 +998,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        # 不缓存：控制台随构建系统一起升级，浏览器留着旧页面会与新接口
+        # 对不上。登录框加用户名那次改动就是这么失效的 —— 缓存的旧页面
+        # 提交时不带用户名，后端认不出是谁，看起来就像"密码错了"。
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(data)
 

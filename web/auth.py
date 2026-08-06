@@ -208,6 +208,15 @@ class Authenticator:
         """是否已有可用于登录的成员。"""
         return any(m.bound and m.secret for m in self.state.members.values())
 
+    def sole_member_name(self) -> str:
+        """恰好只有一位已绑定成员时返回其名字，否则返回空串。
+
+        用于在省略用户名登录时把身份补全 —— 会话若以空名义签发，日后
+        发布记录里的操作者就是一片空白，审计也就无从谈起。
+        """
+        bound = [m.name for m in self.state.members.values() if m.bound]
+        return bound[0] if len(bound) == 1 else ""
+
     def members(self) -> list[dict]:
         return [
             {
@@ -312,6 +321,15 @@ class Authenticator:
             return False, "尚未绑定验证器"
 
         name = _normalize_name(account)
+
+        # 只有一位成员时用户名可省：此时并无歧义，而省略它能容下尚未刷新
+        # 的旧页面与既有脚本。加入第二人后就不再适用 —— 那时必须指名道姓，
+        # 否则失败计数与审计都无从落到具体的人。
+        if not name:
+            bound = [m for m in self.state.members.values() if m.bound]
+            if len(bound) == 1:
+                name = bound[0].name
+
         m = self.state.members.get(name)
 
         # 用户名不存在时，走完与存在时相同的时间开销并给出同样含糊的
