@@ -68,13 +68,48 @@ def provisioning_uri(secret_b32: str, account: str, issuer: str) -> str:
     )
 
 
+#: 单用户时代的账号名，迁移旧配置时沿用
+LEGACY_NAME = "admin"
+
+#: 用户名不存在时用来消耗等量计算，避免以响应快慢泄露成员是否存在
+_DUMMY_SECRET = "A" * 32
+
+
+def _normalize_name(name: str) -> str:
+    """成员名归一：去空白、转小写。
+
+    避免 "Admin" 与 "admin" 被当成两个人，也避免尾随空格造成登录失败
+    却看不出原因。
+    """
+    return (name or "").strip().lower()
+
+
+def _now_text() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 @dataclass
-class AuthState:
+class Member:
+    """一位已登记的使用者。
+
+    失败计数与防重放计数器都按人存放，而非全局：全局存放会让一个人
+    连续输错把所有人一起锁在门外，也会让两人在同一时间窗内先后登录时
+    后者被误判为重放。
+    """
+
+    name: str = ""
     secret: str = ""
     bound: bool = False
     used_counters: list[int] = field(default_factory=list)
     failures: int = 0
     locked_until: float = 0.0
+    added_at: str = ""
+    added_by: str = ""
+
+
+@dataclass
+class AuthState:
+    members: dict = field(default_factory=dict)
 
 
 class Authenticator:
@@ -99,21 +134,50 @@ class Authenticator:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return AuthState()
-        return AuthState(
-            secret=raw.get("secret", ""),
-            bound=bool(raw.get("bound", False)),
-            used_counters=list(raw.get("used_counters", []))[-10:],
-            failures=int(raw.get("failures", 0)),
-            locked_until=float(raw.get("locked_until", 0.0)),
-        )
+
+        # 旧格式为单个密钥。就地迁移成第一位成员，已绑好的验证器继续可用 ——
+        # 让人为了这次改造重新扫码是不必要的打扰。
+        if "members" not in raw and raw.get("secret"):
+            legacy = Member(
+                name=LEGACY_NAME,
+                secret=raw.get("secret", ""),
+                bound=bool(raw.get("bound", False)),
+                used_counters=list(raw.get("used_counters", []))[-10:],
+                failures=int(raw.get("failures", 0)),
+                locked_until=float(raw.get("locked_until", 0.0)),
+                added_at="(迁移自单用户配置)",
+            )
+            return AuthState(members={LEGACY_NAME: legacy})
+
+        members: dict = {}
+        for name, m in (raw.get("members") or {}).items():
+            members[name] = Member(
+                name=name,
+                secret=m.get("secret", ""),
+                bound=bool(m.get("bound", False)),
+                used_counters=list(m.get("used_counters", []))[-10:],
+                failures=int(m.get("failures", 0)),
+                locked_until=float(m.get("locked_until", 0.0)),
+                added_at=m.get("added_at", ""),
+                added_by=m.get("added_by", ""),
+            )
+        return AuthState(members=members)
 
     def _save(self) -> None:
         payload = {
-            "secret": self.state.secret,
-            "bound": self.state.bound,
-            "used_counters": self.state.used_counters[-10:],
-            "failures": self.state.failures,
-            "locked_until": self.state.locked_until,
+            "version": 2,
+            "members": {
+                name: {
+                    "secret": m.secret,
+                    "bound": m.bound,
+                    "used_counters": m.used_counters[-10:],
+                    "failures": m.failures,
+                    "locked_until": m.locked_until,
+                    "added_at": m.added_at,
+                    "added_by": m.added_by,
+                }
+                for name, m in self.state.members.items()
+            },
         }
         tmp = self.path.with_suffix(".tmp")
         old_umask = os.umask(0o077)
@@ -141,37 +205,87 @@ class Authenticator:
 
     @property
     def is_bound(self) -> bool:
-        return self.state.bound and bool(self.state.secret)
+        """是否已有可用于登录的成员。"""
+        return any(m.bound and m.secret for m in self.state.members.values())
 
-    def begin_enrollment(self, account: str = "admin") -> tuple[str, str]:
-        """生成新密钥并返回 (密钥, otpauth 地址)。
+    def members(self) -> list[dict]:
+        return [
+            {
+                "name": m.name,
+                "bound": m.bound,
+                "added_at": m.added_at,
+                "added_by": m.added_by,
+                "locked": time.time() < m.locked_until,
+            }
+            for m in sorted(self.state.members.values(), key=lambda x: x.name)
+        ]
 
-        仅在尚未绑定时可用。已绑定后若需重置，必须删除 secrets/auth.json，
-        这要求对构建机有 shell 访问权限 —— 避免任何人从网页端顶掉现有绑定。
+    def begin_enrollment(self, account: str = LEGACY_NAME) -> tuple[str, str]:
+        """为某人生成新密钥并返回 (密钥, otpauth 地址)。
+
+        首位成员无需登录即可绑定 —— 系统刚装好时还没有人能登录。此后
+        再添加成员须由已登录者发起，这一层由 server 的会话校验把关。
+
+        已绑定的成员不可从网页端顶掉：重置须在构建机上编辑
+        secrets/auth.json，也就要求先有 shell 访问权限。
         """
-        if self.is_bound:
-            raise PermissionError("已完成绑定；如需重置请在构建机上删除 secrets/auth.json")
-        self.state.secret = generate_secret()
-        self.state.bound = False
-        self._save()
-        return self.state.secret, provisioning_uri(self.state.secret, account, self.issuer)
+        name = _normalize_name(account)
+        if not name:
+            raise ValueError("成员名不能为空")
 
-    def confirm_enrollment(self, code: str) -> bool:
-        """校验一次动态码以确认验证器绑定成功。"""
-        if self.is_bound:
-            raise PermissionError("已完成绑定")
-        if not self.state.secret:
+        exist = self.state.members.get(name)
+        if exist is not None and exist.bound:
+            raise PermissionError(
+                f"{name} 已完成绑定；如需重置请在构建机上编辑 secrets/auth.json"
+            )
+
+        secret = generate_secret()
+        self.state.members[name] = Member(
+            name=name,
+            secret=secret,
+            bound=False,
+            added_at=exist.added_at if exist else "",
+            added_by=exist.added_by if exist else "",
+        )
+        self._save()
+        return secret, provisioning_uri(secret, name, self.issuer)
+
+    def confirm_enrollment(self, code: str, account: str = LEGACY_NAME,
+                           added_by: str = "") -> bool:
+        """校验一次动态码以确认某人的验证器绑定成功。"""
+        name = _normalize_name(account)
+        m = self.state.members.get(name)
+        if m is None or not m.secret:
             raise ValueError("尚未开始绑定")
-        if not self._check_code(code):
+        if m.bound:
+            raise PermissionError(f"{name} 已完成绑定")
+        if not self._check_code(m, code):
             return False
-        self.state.bound = True
-        self.state.failures = 0
+        m.bound = True
+        m.failures = 0
+        m.added_at = m.added_at or _now_text()
+        m.added_by = m.added_by or added_by
         self._save()
         return True
 
+    def remove_member(self, name: str, operator: str = "") -> None:
+        """移除成员。
+
+        不允许移除最后一位 —— 那会让所有人都进不去，只能到构建机上手工
+        修文件才能恢复。
+        """
+        name = _normalize_name(name)
+        if name not in self.state.members:
+            raise ValueError(f"没有名为 {name} 的成员")
+        bound = [n for n, m in self.state.members.items() if m.bound]
+        if bound == [name]:
+            raise PermissionError("这是最后一位已绑定的成员，移除后将无人可登录")
+        del self.state.members[name]
+        self._save()
+
     # ── 校验 ────────────────────────────────────────────────────────
 
-    def _check_code(self, code: str) -> bool:
+    def _check_code(self, member: Member, code: str) -> bool:
         code = (code or "").strip().replace(" ", "")
         if not code.isdigit() or len(code) != DIGITS:
             return False
@@ -182,41 +296,50 @@ class Authenticator:
         # 前后各一个步长，容忍时钟漂移
         for delta in (0, -1, 1):
             candidate = counter + delta
-            if candidate in self.state.used_counters:
+            if candidate in member.used_counters:
                 continue
-            if hmac.compare_digest(_hotp(self.state.secret, candidate), code):
-                self.state.used_counters.append(candidate)
-                self.state.used_counters = self.state.used_counters[-10:]
+            if hmac.compare_digest(_hotp(member.secret, candidate), code):
+                member.used_counters.append(candidate)
+                member.used_counters = member.used_counters[-10:]
                 return True
         return False
 
-    def verify(self, code: str) -> tuple[bool, str]:
-        """校验动态码。返回 (是否通过, 说明)。"""
+    def verify(self, code: str, account: str = "") -> tuple[bool, str]:
+        """校验某人的动态码。返回 (是否通过, 说明)。"""
         now = time.time()
 
         if not self.is_bound:
             return False, "尚未绑定验证器"
 
-        if now < self.state.locked_until:
-            wait = int(self.state.locked_until - now)
+        name = _normalize_name(account)
+        m = self.state.members.get(name)
+
+        # 用户名不存在时，走完与存在时相同的时间开销并给出同样含糊的
+        # 提示 —— 否则错误信息就成了枚举系统里有哪些人的探针。
+        if m is None or not m.bound:
+            _hotp(_DUMMY_SECRET, int(now // PERIOD))
+            return False, "用户名或验证码不正确"
+
+        if now < m.locked_until:
+            wait = int(m.locked_until - now)
             return False, f"失败次数过多，请 {wait} 秒后重试"
 
-        if self._check_code(code):
-            self.state.failures = 0
-            self.state.locked_until = 0.0
+        if self._check_code(m, code):
+            m.failures = 0
+            m.locked_until = 0.0
             self._save()
             return True, "验证通过"
 
-        self.state.failures += 1
-        if self.state.failures >= MAX_FAILURES:
-            self.state.locked_until = now + LOCKOUT_SECONDS
-            self.state.failures = 0
+        m.failures += 1
+        if m.failures >= MAX_FAILURES:
+            m.locked_until = now + LOCKOUT_SECONDS
+            m.failures = 0
             self._save()
             return False, f"失败次数过多，已锁定 {LOCKOUT_SECONDS // 60} 分钟"
 
         self._save()
-        remaining = MAX_FAILURES - self.state.failures
-        return False, f"验证码不正确，还可尝试 {remaining} 次"
+        remaining = MAX_FAILURES - m.failures
+        return False, f"用户名或验证码不正确，还可尝试 {remaining} 次"
 
     # ── 会话 ────────────────────────────────────────────────────────
 

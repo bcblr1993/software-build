@@ -265,6 +265,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({
                 "bound": self.server.auth.is_bound,
                 "authenticated": self._subject() is not None,
+                "subject": self._subject() or "",
                 "busy": self.server.runner.busy,
                 "current": self.server.runner.current,
             })
@@ -294,6 +295,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._api_artifacts()
 
+        if route == "/api/members":
+            return self._api_members()
+
         if route == "/api/download-link":
             if self._require_auth() is None:
                 return
@@ -319,13 +323,15 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
 
         if route == "/api/enroll/begin":
-            return self._api_enroll_begin()
+            return self._api_enroll_begin(body)
         if route == "/api/enroll/confirm":
             return self._api_enroll_confirm(body)
         if route == "/api/login":
             return self._api_login(body)
         if route == "/api/logout":
             return self._api_logout()
+        if route == "/api/members/remove":
+            return self._api_member_remove(body)
 
         if route == "/api/components":
             if self._require_auth() is None:
@@ -353,33 +359,80 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── 认证 ────────────────────────────────────────────────────────
 
-    def _api_enroll_begin(self) -> None:
+    def _api_enroll_begin(self, body: dict | None = None) -> None:
         auth = self.server.auth
+        body = body or {}
+        name = str(body.get("name") or "").strip()
+
+        # 首位成员无需登录 —— 系统刚装好时还没有人能登录。此后再添加
+        # 成员必须由已登录者发起，否则任何人都能给自己开一个账号进来。
+        operator = ""
+        if auth.is_bound:
+            operator = self._require_auth()
+            if operator is None:
+                return
+            if not name:
+                return self._send_json({"error": "请填写新成员的名称"}, 400)
+        name = name or "admin"
+
         try:
-            secret, uri = auth.begin_enrollment()
-        except PermissionError as exc:
+            secret, uri = auth.begin_enrollment(name)
+        except (PermissionError, ValueError) as exc:
             return self._send_json({"error": str(exc)}, 409)
         # 分组显示便于手工输入
         grouped = " ".join(secret[i:i + 4] for i in range(0, len(secret), 4))
-        self._send_json({"secret": secret, "secret_grouped": grouped, "uri": uri})
+        self._send_json({
+            "name": name, "secret": secret,
+            "secret_grouped": grouped, "uri": uri,
+            "invited_by": operator or "",
+        })
 
     def _api_enroll_confirm(self, body: dict) -> None:
         auth = self.server.auth
+        name = str(body.get("name") or "admin").strip()
+        # 已有成员时，这是在给别人开账号，操作者身份记进审计字段
+        operator = ""
+        if auth.is_bound:
+            operator = self._subject() or ""
         try:
-            ok = auth.confirm_enrollment(str(body.get("code", "")))
+            ok = auth.confirm_enrollment(
+                str(body.get("code", "")), account=name, added_by=operator,
+            )
         except (PermissionError, ValueError) as exc:
             return self._send_json({"error": str(exc)}, 409)
         if not ok:
             return self._send_json({"error": "验证码不正确，请确认设备时间准确"}, 400)
-        # 绑定成功即视为已登录，直接签发会话
-        self._send_with_session({"ok": True}, auth.issue_session())
+
+        # 首次绑定即视为本人登录；由他人代开的账号不顺带签发会话，
+        # 否则操作者的浏览器会变成新成员的身份。
+        if operator:
+            return self._send_json({"ok": True, "name": name})
+        self._send_with_session({"ok": True, "name": name}, auth.issue_session(name))
 
     def _api_login(self, body: dict) -> None:
         auth = self.server.auth
-        ok, msg = auth.verify(str(body.get("code", "")))
+        name = str(body.get("name") or "").strip()
+        ok, msg = auth.verify(str(body.get("code", "")), account=name)
         if not ok:
             return self._send_json({"error": msg}, 401)
-        self._send_with_session({"ok": True, "message": msg}, auth.issue_session())
+        self._send_with_session(
+            {"ok": True, "message": msg, "name": name}, auth.issue_session(name),
+        )
+
+    def _api_members(self) -> None:
+        if self._require_auth() is None:
+            return
+        self._send_json({"members": self.server.auth.members()})
+
+    def _api_member_remove(self, body: dict) -> None:
+        operator = self._require_auth()
+        if operator is None:
+            return
+        try:
+            self.server.auth.remove_member(str(body.get("name", "")), operator)
+        except (PermissionError, ValueError) as exc:
+            return self._send_json({"error": str(exc)}, 409)
+        self._send_json({"ok": True})
 
     def _send_with_session(self, payload: dict, token: str) -> None:
         """发送 JSON 响应并附带会话 Cookie。

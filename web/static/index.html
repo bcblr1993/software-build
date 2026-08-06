@@ -107,6 +107,9 @@
       <p class="note" style="margin-top:14px">添加完成后，输入验证器显示的验证码完成绑定：</p>
     </div>
 
+    <input id="member-name" type="text" placeholder="用户名"
+           autocomplete="username" style="width:100%;padding:10px;margin-bottom:10px;
+           border:1px solid #d0d7de;border-radius:6px;font-size:15px;box-sizing:border-box">
     <input id="code" class="code-input" type="text" inputmode="numeric"
            maxlength="6" placeholder="000000" autocomplete="one-time-code">
     <p class="err" id="gate-err"></p>
@@ -218,6 +221,34 @@
     <p class="sub">每次构建自动记录组件变化、产物校验和与目标系统验证结果</p>
     <div id="hist-body"><p class="note">尚无构建记录</p></div>
   </div>
+
+  <div class="card">
+    <h2>使用人员</h2>
+    <p class="sub">每人绑定各自的验证器；发布记录会写明由谁发起</p>
+    <div id="members-body"><p class="note">加载中…</p></div>
+    <div class="row" style="margin-top:14px">
+      <input id="new-member" type="text" placeholder="新成员用户名"
+             style="padding:9px;border:1px solid #d0d7de;border-radius:6px;font-size:14px">
+      <button id="add-member-btn">生成绑定密钥</button>
+      <span class="note" id="member-msg"></span>
+    </div>
+    <div id="invite-box" class="hide" style="margin-top:14px;padding:14px;
+         background:#f6f8fa;border-radius:8px">
+      <p class="note">把下面的密钥交给 <strong id="invite-name"></strong>，
+         让其在验证器中添加（时间型 / TOTP / 6 位 / 30 秒）：</p>
+      <div class="secret" id="invite-secret" style="margin-top:8px"></div>
+      <p class="note" style="margin-top:10px">或直接扫这个地址：</p>
+      <div class="secret" id="invite-uri" style="font-size:12px"></div>
+      <p class="note" style="margin-top:12px">添加后，请其输入验证器上的验证码完成绑定：</p>
+      <div class="row" style="margin-top:8px">
+        <input id="invite-code" type="text" inputmode="numeric" maxlength="6"
+               placeholder="000000" style="padding:9px;border:1px solid #d0d7de;
+               border-radius:6px;font-size:14px;width:110px">
+        <button class="primary" id="invite-confirm-btn">确认绑定</button>
+        <span class="note" id="invite-msg"></span>
+      </div>
+    </div>
+  </div>
 </main>
 </div>
 
@@ -236,6 +267,7 @@ async function refreshStatus() {
   const {data} = await api('/api/status');
   state.bound = data.bound;
   state.authed = data.authenticated;
+  state.subject = data.subject || '';
   if (data.authenticated) {
     $('#gate').classList.add('hide');
     $('#app').classList.remove('hide');
@@ -244,6 +276,7 @@ async function refreshStatus() {
     loadHistory();
     loadCapacity();
     loadReleases();
+    loadMembers();
     if (data.busy) attachLog();
   } else {
     $('#gate').classList.remove('hide');
@@ -254,31 +287,112 @@ async function refreshStatus() {
 
 async function startEnroll() {
   $('#gate-title').textContent = '绑定验证器';
-  $('#gate-sub').textContent = '首次使用需绑定一个动态验证码应用';
+  $('#gate-sub').textContent = '首次使用需绑定一个动态验证码应用，请先起一个用户名';
   $('#gate-btn').textContent = '完成绑定';
   $('#enroll').classList.remove('hide');
-  const {ok, data} = await api('/api/enroll/begin', {method: 'POST'});
-  if (ok) {
-    $('#secret-text').textContent = data.secret_grouped;
-    $('#secret-uri').textContent = data.uri;
-  } else {
-    $('#gate-err').textContent = data.error || '无法开始绑定';
-  }
+  // 首位成员的密钥要等用户名确定后才能签发，此处不预取
+  $('#secret-text').textContent = '（填好用户名后点下方按钮获取密钥）';
+  $('#secret-uri').textContent = '';
+  $('#gate-btn').textContent = '获取密钥';
+  gateStage = 'need-secret';
 }
 
+// 首次绑定分两步：先凭用户名取密钥，扫码后再输验证码确认
+let gateStage = 'login';
+
 $('#gate-btn').onclick = async () => {
+  const name = ($('#member-name').value || '').trim();
   const code = $('#code').value.trim();
-  if (code.length !== 6) { $('#gate-err').textContent = '请输入 6 位验证码'; return; }
   $('#gate-err').textContent = '';
-  const path = state.bound ? '/api/login' : '/api/enroll/confirm';
-  const {ok, data} = await api(path, {method: 'POST', body: JSON.stringify({code})});
-  if (ok) { $('#code').value = ''; refreshStatus(); }
+
+  if (!name) { $('#gate-err').textContent = '请填写用户名'; return; }
+
+  if (gateStage === 'need-secret') {
+    const {ok, data} = await api('/api/enroll/begin',
+      {method: 'POST', body: JSON.stringify({name})});
+    if (!ok) { $('#gate-err').textContent = data.error || '无法开始绑定'; return; }
+    $('#secret-text').textContent = data.secret_grouped;
+    $('#secret-uri').textContent = data.uri;
+    $('#gate-btn').textContent = '完成绑定';
+    gateStage = 'confirm';
+    return;
+  }
+
+  if (code.length !== 6) { $('#gate-err').textContent = '请输入 6 位验证码'; return; }
+  const path = gateStage === 'confirm' ? '/api/enroll/confirm' : '/api/login';
+  const {ok, data} = await api(path, {method: 'POST', body: JSON.stringify({name, code})});
+  if (ok) { $('#code').value = ''; gateStage = 'login'; refreshStatus(); }
   else $('#gate-err').textContent = data.error || '验证失败';
 };
 
 $('#code').addEventListener('keydown', e => { if (e.key === 'Enter') $('#gate-btn').click(); });
 
 $('#logout').onclick = async () => { await api('/api/logout', {method: 'POST'}); location.reload(); };
+
+// ── 使用人员 ──────────────────────────────────────────────────────
+async function loadMembers() {
+  const {ok, data} = await api('/api/members');
+  if (!ok) return;
+  const rows = (data.members || []).map(m => `<tr>
+      <td><strong>${m.name}</strong>${m.name === state.subject
+          ? ' <span class="tag">当前登录</span>' : ''}</td>
+      <td>${m.bound ? '<span class="tag ok">已绑定</span>'
+                    : '<span class="tag warn">待绑定</span>'}
+          ${m.locked ? ' <span class="tag warn">已锁定</span>' : ''}</td>
+      <td class="note">${m.added_at || '—'}${m.added_by ? `（${m.added_by} 添加）` : ''}</td>
+      <td><button data-del="${m.name}">移除</button></td>
+    </tr>`).join('');
+  $('#members-body').innerHTML = rows
+    ? `<table><thead><tr><th style="width:26%">用户名</th><th style="width:22%">状态</th>
+       <th style="width:36%">加入时间</th><th style="width:16%"></th></tr></thead>
+       <tbody>${rows}</tbody></table>`
+    : '<p class="note">尚无成员</p>';
+
+  document.querySelectorAll('#members-body button[data-del]').forEach(b => {
+    b.onclick = async () => {
+      const name = b.dataset.del;
+      if (!confirm(`确定移除 ${name}？其验证器将立即失效。`)) return;
+      const {ok, data} = await api('/api/members/remove',
+        {method: 'POST', body: JSON.stringify({name})});
+      $('#member-msg').textContent = ok ? `已移除 ${name}` : (data.error || '移除失败');
+      loadMembers();
+    };
+  });
+}
+
+$('#add-member-btn').onclick = async () => {
+  const name = ($('#new-member').value || '').trim();
+  $('#member-msg').textContent = '';
+  if (!name) { $('#member-msg').textContent = '请填写用户名'; return; }
+  const {ok, data} = await api('/api/enroll/begin',
+    {method: 'POST', body: JSON.stringify({name})});
+  if (!ok) { $('#member-msg').textContent = data.error || '无法生成密钥'; return; }
+  $('#invite-name').textContent = data.name;
+  $('#invite-secret').textContent = data.secret_grouped;
+  $('#invite-uri').textContent = data.uri;
+  $('#invite-box').classList.remove('hide');
+  $('#invite-box').dataset.name = data.name;
+  $('#member-msg').textContent = '';
+  loadMembers();
+};
+
+$('#invite-confirm-btn').onclick = async () => {
+  const name = $('#invite-box').dataset.name;
+  const code = ($('#invite-code').value || '').trim();
+  $('#invite-msg').textContent = '';
+  if (code.length !== 6) { $('#invite-msg').textContent = '请输入 6 位验证码'; return; }
+  const {ok, data} = await api('/api/enroll/confirm',
+    {method: 'POST', body: JSON.stringify({name, code})});
+  if (ok) {
+    $('#invite-msg').textContent = `${name} 绑定完成`;
+    $('#invite-code').value = '';
+    $('#new-member').value = '';
+    setTimeout(() => $('#invite-box').classList.add('hide'), 1500);
+    loadMembers();
+  } else {
+    $('#invite-msg').textContent = data.error || '绑定失败';
+  }
+};
 
 async function loadComponents() {
   const {ok, data} = await api('/api/components');
