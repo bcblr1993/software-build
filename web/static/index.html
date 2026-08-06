@@ -90,6 +90,44 @@
   .hide { display: none; }
   .err { color: var(--bad); font-size: 13px; min-height: 20px; }
   .note { color: var(--muted); font-size: 12px; }
+
+  /* 验证清单：行要紧凑，操作列不能换行 —— 按钮一旦竖排就没法看了 */
+  #ck-body table { table-layout: fixed; }
+  #ck-body td { padding: 7px 10px; vertical-align: middle; }
+  #ck-body .sysname { font-weight: 600; word-break: break-all; line-height: 1.35; }
+  #ck-body .acts { white-space: nowrap; text-align: right; }
+  #ck-body .acts button { padding: 4px 10px; font-size: 12px; margin-left: 6px; }
+  #ck-body input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
+
+  /* 模态框 */
+  .mask {
+    position: fixed; inset: 0; background: rgba(16,21,27,.45);
+    display: flex; align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal {
+    background: var(--card); border-radius: 10px; width: 460px; max-width: 92vw;
+    max-height: 88vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,.22);
+  }
+  .modal .head { padding: 18px 22px 0; }
+  .modal .head h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .modal .body { padding: 16px 22px; }
+  .modal .foot {
+    padding: 14px 22px; border-top: 1px solid var(--line);
+    display: flex; gap: 10px; align-items: center;
+  }
+  .field { margin-bottom: 12px; }
+  .field label {
+    display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px;
+  }
+  .field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .field-row { display: flex; gap: 10px; }
+  .field-row .field { flex: 1; }
+  .result {
+    margin-top: 12px; padding: 12px; border-radius: 6px; font-size: 12px;
+    background: #f6f8fa; line-height: 1.7; white-space: pre-wrap;
+  }
+  .result.ok { background: #e7f6ed; color: var(--ok); }
+  .result.bad { background: #fdecea; color: var(--bad); }
 </style>
 </head>
 <body>
@@ -262,6 +300,57 @@
     </div>
   </div>
 </main>
+
+    <div id="tg-mask" class="mask hide">
+      <div class="modal">
+        <div class="head">
+          <h3>配置目标机</h3>
+          <p class="note" id="tg-sys"></p>
+        </div>
+        <div class="body">
+          <div class="field-row">
+            <div class="field" style="flex:3">
+              <label>主机地址</label>
+              <input type="text" id="tg-host" placeholder="IP 或主机名">
+            </div>
+            <div class="field" style="flex:1">
+              <label>端口</label>
+              <input type="text" id="tg-port" placeholder="22">
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>登录用户</label>
+              <input type="text" id="tg-user" placeholder="root">
+              <div class="hint">用于推送安装包并切换身份</div>
+            </div>
+            <div class="field">
+              <label>验证身份</label>
+              <input type="text" id="tg-runas" placeholder="sprixin">
+              <div class="hint">以此普通用户运行，与现场一致</div>
+            </div>
+          </div>
+          <div class="field">
+            <label>登录口令</label>
+            <input type="password" id="tg-pass" placeholder="留空则沿用已保存的口令">
+            <div class="hint">存于构建机 secrets/ 下（权限 600），界面不回显</div>
+          </div>
+          <div class="field">
+            <label>备注（可选）</label>
+            <input type="text" id="tg-note" placeholder="可写机房位置等">
+          </div>
+          <div id="tg-result" class="result hide"></div>
+        </div>
+        <div class="foot">
+          <button id="tg-test">测试连接</button>
+          <span style="flex:1"></span>
+          <button id="tg-del" style="color:var(--bad)">删除</button>
+          <button id="tg-cancel">取消</button>
+          <button class="primary" id="tg-save">保存</button>
+        </div>
+      </div>
+    </div>
+
 </div>
 
 <script>
@@ -642,41 +731,98 @@ let targetsCache = {};
 
 // 目标机登记：为每个目标系统绑定一台真实机器，之后可一键送包过去验证。
 // 口令存在构建机的 secrets/ 下（权限 600，已在 .gitignore 中），接口永不回显。
+let tgCurrent = null;
+
 function openTargetDialog(name) {
   const t = targetsCache[name] || {};
-  const host = prompt(`【${name}】\n\n目标机地址（IP 或主机名）：`, t.host || '');
-  if (host === null) return;
-  const port = prompt('SSH 端口：', t.port || 22);
-  if (port === null) return;
-  const username = prompt('登录用户（通常 root，用于推送与切换身份）：', t.username || 'root');
-  if (username === null) return;
-  const password = prompt(
-    '登录口令：\n（留空表示沿用已保存的口令，仅修改其它项时可留空）', '');
-  if (password === null) return;
-  const runAs = prompt(
-    '验证时切换到的普通用户：\n现场只有普通用户，用 root 验证会得出与现场不符的结论',
-    t.run_as || 'sprixin');
-  if (runAs === null) return;
-
-  api('/api/targets/save', {method: 'POST', body: JSON.stringify({
-    name, host: host.trim(), port: parseInt(port, 10) || 22,
-    username: username.trim(), password, run_as: runAs.trim(),
-  })}).then(async ({ok, data}) => {
-    if (!ok) { alert(data.error || '保存失败'); return; }
-    await loadTargets();
-    const r = await api('/api/targets/check', {method: 'POST', body: JSON.stringify({name})});
-    if (r.ok) {
-      const i = r.data.info || {};
-      const w = (r.data.warnings || []);
-      alert(`连接成功\n\n系统：${i.os || '?'}\n架构：${i.arch || '?'}  glibc ${i.glibc || '?'}\n` +
-            `主机名：${i.hostname || '?'}\n验证身份：${runAs}（${i.runas === 'yes' ? '存在' : '不存在'}）\n` +
-            (w.length ? `\n需注意：\n${w.map(x => '· ' + x).join('\n')}` : '\n一切就绪'));
-    } else {
-      alert(`已保存，但连接测试失败：\n${r.data.error || '未知原因'}`);
-    }
-    loadChecklist();
-  });
+  tgCurrent = name;
+  $('#tg-sys').textContent = name;
+  $('#tg-host').value = t.host || '';
+  $('#tg-port').value = t.port || 22;
+  $('#tg-user').value = t.username || 'root';
+  $('#tg-runas').value = t.run_as || 'sprixin';
+  $('#tg-note').value = t.note || '';
+  $('#tg-pass').value = '';
+  $('#tg-del').style.display = t.configured ? '' : 'none';
+  tgResult('', '');
+  $('#tg-mask').classList.remove('hide');
+  setTimeout(() => $('#tg-host').focus(), 50);
 }
+
+function tgResult(text, cls) {
+  const el = $('#tg-result');
+  el.textContent = text;
+  el.className = 'result' + (cls ? ' ' + cls : '') + (text ? '' : ' hide');
+}
+
+function tgPayload() {
+  return {
+    name: tgCurrent,
+    host: $('#tg-host').value.trim(),
+    port: parseInt($('#tg-port').value, 10) || 22,
+    username: $('#tg-user').value.trim() || 'root',
+    password: $('#tg-pass').value,
+    run_as: $('#tg-runas').value.trim() || 'sprixin',
+    note: $('#tg-note').value.trim(),
+  };
+}
+
+function tgClose() { $('#tg-mask').classList.add('hide'); tgCurrent = null; }
+
+$('#tg-cancel').onclick = tgClose;
+$('#tg-mask').onclick = (e) => { if (e.target === $('#tg-mask')) tgClose(); };
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#tg-mask').classList.contains('hide')) tgClose();
+});
+
+// 先存再测：探测要用到刚填的口令，而口令不经接口回传，只能落盘后再读
+async function tgSaveThen(afterFn) {
+  const p = tgPayload();
+  if (!p.host) { tgResult('请填写主机地址', 'bad'); return false; }
+  const {ok, data} = await api('/api/targets/save',
+    {method: 'POST', body: JSON.stringify(p)});
+  if (!ok) { tgResult(data.error || '保存失败', 'bad'); return false; }
+  await loadTargets();
+  if (afterFn) await afterFn();
+  return true;
+}
+
+$('#tg-test').onclick = async () => {
+  $('#tg-test').disabled = true;
+  tgResult('正在连接…', '');
+  await tgSaveThen(async () => {
+    const r = await api('/api/targets/check',
+      {method: 'POST', body: JSON.stringify({name: tgCurrent})});
+    if (!r.ok) { tgResult(r.data.error || '连接失败', 'bad'); return; }
+    const i = r.data.info || {}, w = r.data.warnings || [];
+    const lines = [
+      `系统　　：${i.os || '未知'}`,
+      `架构　　：${i.arch || '?'}　glibc ${i.glibc || '?'}`,
+      `主机名　：${i.hostname || '?'}${i.hostname_resolves === 'no' ? '（解析异常）' : ''}`,
+      `验证身份：${$('#tg-runas').value.trim()}${i.runas === 'yes' ? ' 存在' : ' 不存在'}`,
+      `可用空间：${i.free ? Math.floor(i.free / 1048576) + ' GB' : '未知'}`,
+    ];
+    if (w.length) lines.push('', '需注意：', ...w.map(x => '· ' + x));
+    tgResult(lines.join('\n'), w.length ? '' : 'ok');
+  });
+  $('#tg-test').disabled = false;
+};
+
+$('#tg-save').onclick = async () => {
+  $('#tg-save').disabled = true;
+  if (await tgSaveThen(null)) { tgClose(); loadChecklist(); }
+  $('#tg-save').disabled = false;
+};
+
+$('#tg-del').onclick = async () => {
+  if (!confirm(`删除 ${tgCurrent} 的目标机配置？`)) return;
+  const {ok, data} = await api('/api/targets/delete',
+    {method: 'POST', body: JSON.stringify({name: tgCurrent})});
+  if (!ok) { tgResult(data.error || '删除失败', 'bad'); return; }
+  await loadTargets();
+  tgClose();
+  loadChecklist();
+};
 
 async function loadTargets() {
   const {ok, data} = await api('/api/targets');
@@ -721,22 +867,25 @@ async function loadChecklist() {
         ? `<span class="note">${tg.username}@${tg.host}</span>`
         : '<span class="note">未配置</span>';
       return `<tr>
-        <td style="width:34px">${cbox}</td>
-        <td><strong>${i.target}</strong>
-            ${i.glibc ? ` <span class="note">glibc ${i.glibc}</span>` : ''}
-            ${sub ? `<div class="note">${sub}</div>` : ''}</td>
-        <td style="width:15%">${cont}</td>
-        <td style="width:19%">${done}</td>
-        <td style="width:16%">${sshCell}</td>
-        <td style="width:19%" class="row" style="gap:4px">
-          <button data-cfg="${i.target}" style="font-size:12px;padding:3px 8px">配置</button>
-          <button data-run="${i.target}" style="font-size:12px;padding:3px 8px"
-                  ${tg && tg.configured ? '' : 'disabled'}>自动验证</button>
+        <td style="width:36px">${cbox}</td>
+        <td>
+          <div class="sysname">${i.target}
+            ${i.glibc ? `<span class="note" style="font-weight:400"> glibc ${i.glibc}</span>` : ''}
+          </div>
+          ${sub ? `<div class="note">${sub}</div>` : ''}
+        </td>
+        <td style="width:100px">${cont}</td>
+        <td style="width:150px">${done}</td>
+        <td style="width:150px">${sshCell}</td>
+        <td class="acts" style="width:170px">
+          <button data-cfg="${i.target}">配置</button>
+          <button data-run="${i.target}" ${tg && tg.configured ? '' : 'disabled'}>自动验证</button>
         </td>
       </tr>`;
     }).join('');
     $('#ck-body').innerHTML = `<table><thead><tr>
-        <th></th><th>目标系统</th><th>自动验证</th><th>实机确认</th><th>目标机</th><th></th>
+        <th></th><th>目标系统</th><th>自动验证</th><th>实机确认</th>
+        <th>目标机</th><th class="acts"></th>
       </tr></thead><tbody>${rows}</tbody></table>`;
 
     document.querySelectorAll('#ck-body button[data-cfg]').forEach(b => {
