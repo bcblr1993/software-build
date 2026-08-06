@@ -192,21 +192,37 @@ def cmd_fetch(args, cfg: Config, ws: Workspace) -> int:
     return 0
 
 
-def uploaded_components(ws: Workspace, cfg: Config, arch: str) -> set[str]:
-    """列出已有上传件、因而无需从上游获取的组件。
+def find_uploads(ws: Workspace, cfg: Config, arch: str) -> dict[str, Path]:
+    """找出本次打包应采用的上传件。
 
-    识别口径与打包阶段一致（同为 repack 类型 + uploads/<arch>/<名>.tar.gz），
-    两处若不一致，就会出现"下了却没用"或"没下却要用"。
+    先看本架构自己的 uploads/<arch>/；没有时，若该组件与架构无关，
+    再按 architectures 的次序到别的架构里找。
+
+    这条回退是必要的：nacos 是纯 Java，两个架构本该用同一份。此前只上传
+    了 x86_64 那一份，ARM 便退回上游原版，同一个 v14 的两个包里装着不同
+    的 nacos —— 一个是改过的，一个不是。
+
+    architectures 中 x86_64 在前，因而它是事实上的主来源。
     """
-    found: set[str] = set()
-    upload_dir = ws.root / "uploads" / arch
-    if not upload_dir.is_dir():
-        return found
-    for f in upload_dir.glob("*.tar.gz"):
-        name = f.stem.replace(".tar", "")
-        comp = cfg.components.get(name)
-        if comp is not None and comp.build == "repack":
-            found.add(name)
+    found: dict[str, Path] = {}
+
+    def _pick(a: str, name: str) -> Path | None:
+        p = ws.root / "uploads" / a / f"{name}.tar.gz"
+        return p if p.is_file() else None
+
+    for name, comp in cfg.components.items():
+        if comp.build != "repack":
+            continue
+        hit = _pick(arch, name)
+        if hit is None and comp.arch_independent:
+            for other in cfg.architectures:
+                if other == arch:
+                    continue
+                hit = _pick(other, name)
+                if hit is not None:
+                    break
+        if hit is not None:
+            found[name] = hit
     return found
 
 
@@ -270,7 +286,9 @@ def cmd_build(args, cfg: Config, ws: Workspace) -> int:
     section(f"获取上游源码（{arch}）")
     fetcher = Fetcher(ws.cache, log=log, repo_root=REPO_ROOT)
     try:
-        results = fetcher.fetch_all(cfg, arch, skip=uploaded_components(ws, cfg, arch))
+        results = fetcher.fetch_all(
+            cfg, arch, skip=set(find_uploads(ws, cfg, arch))
+        )
     except FetchError as exc:
         log(f"\n{exc}")
         return 1
@@ -405,16 +423,13 @@ def do_package(args, cfg: Config, ws: Workspace, *, arch: str,
     # 静态产物，都不链接系统库，现场常需按需调整后直接替换，不必重新走
     # 编译流程。仅对 build: repack 的组件生效 —— 需编译的组件必须经由
     # 基线构建与 ABI 门禁，否则跨系统兼容性无从保证。
-    uploaded: dict[str, Path] = {}
-    upload_dir = ws.root / "uploads" / arch
-    if upload_dir.is_dir():
-        for f in sorted(upload_dir.glob("*.tar.gz")):
-            name = f.stem.replace(".tar", "")
-            comp = cfg.components.get(name)
-            if comp is None or comp.build != "repack":
-                continue
-            uploaded[name] = f
-            log(f"  采用上传的归档: {name} ← {f.name}")
+    uploaded = find_uploads(ws, cfg, arch)
+    for name, f in sorted(uploaded.items()):
+        # 标明来自哪个架构：架构无关的组件可能取自另一架构的上传件，
+        # 日志里不写清楚，日后对不上账。
+        origin = f.parent.name
+        via = "" if origin == arch else f"（取自 {origin}，该组件与架构无关）"
+        log(f"  采用上传的归档: {name} ← {f.name}{via}")
 
     if not sources:
         log("没有可打包的组件，请先执行 build 或 import-base")

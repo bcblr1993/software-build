@@ -123,6 +123,11 @@ components:
   # 升级时直接替换上游归档即可，无需编译。
   nacos:
     build: repack
+    # 纯 Java，产物不含原生代码，两个架构用的是同一份东西。
+    # 故某一架构上传的归档对另一架构同样适用 —— 否则只传了 x86 那份时，
+    # ARM 会退回上游原版，同一个版本的两个包里装着不同的 nacos。
+    # 注意 influxdb 与 jdk 不可比照办理：它们是各自架构的原生二进制。
+    arch_independent: true
     version: "2.2.3"
     url: https://github.com/alibaba/nacos/releases/download/{version}/nacos-server-{version}.tar.gz
     sha256: LOCK

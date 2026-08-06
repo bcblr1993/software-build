@@ -66,6 +66,11 @@ class Component:
     nifs: list[str] = field(default_factory=list)
     otp_tag: str | None = None
     local_only: bool = False
+    #: 产物是否与 CPU 架构无关（纯 Java 等）。为真时，某一架构上传的归档
+    #: 可被其余架构共用，避免同一个组件在两个包里是不同的东西。
+    #: 只有确实不含原生代码的组件才可置真 —— influxdb 是 Go 编译的原生
+    #: 二进制，jdk 同理，二者都必须按架构分别提供。
+    arch_independent: bool = False
     note: str | None = None
 
     VALID_BUILDS = ("compile", "relink-nif", "repack")
@@ -160,6 +165,7 @@ class Config:
                 nifs=list(spec.get("nifs") or []),
                 otp_tag=spec.get("otp_tag"),
                 local_only=bool(spec.get("local_only", False)),
+                arch_independent=bool(spec.get("arch_independent", False)),
                 note=spec.get("note"),
             )
 
