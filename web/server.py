@@ -937,7 +937,15 @@ class Handler(BaseHTTPRequestHandler):
             "filename": target.name,
             "size": target.stat().st_size,
             "expires_at": expiry,
-            "curl": f"curl -fLO 'http://{host}/download?{query}'",
+            # 显式给出输出文件名。curl 的 -O 取的是 URL 末段，而这里的
+            # 地址以 ?path=…&sig=… 结尾，-O 会把整串 query 当成文件名存下来，
+            # 拿到手还得自己 mv 一次。-J 虽能读 Content-Disposition，但要
+            # 额外开关且各版本行为不一，不如把名字写死来得干脆。
+            "curl": f"curl -fL -o '{target.name}' 'http://{host}/download?{query}'",
+            "wget": (
+                f"wget --content-disposition -O '{target.name}' "
+                f"'http://{host}/download?{query}'"
+            ),
         })
 
     def _api_download(self) -> None:
