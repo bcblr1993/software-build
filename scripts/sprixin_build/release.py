@@ -78,6 +78,12 @@ class ReleaseManager:
             raise ReleaseError(f"找不到候选产物: {artifact}")
 
         target_dir = self.releases_dir / version
+        # 同一版本号下的另一个架构要写进同一个目录，而先发布的那个已把整个
+        # 目录冻上了（immutable + 只读）。不先解冻，第二个架构必然报
+        # "Operation not permitted" —— x86 发完 ARM 就发不出去。
+        # 解冻只针对目录本身，已有文件的保护在末尾会连同新文件一起恢复。
+        if target_dir.exists():
+            self._thaw(target_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         # 包名随发布版本号走：候选产物名里带的是打包当时的版本，发布成
@@ -154,6 +160,7 @@ class ReleaseManager:
             build_id=build_id,
             released_by=released_by,
             test_note=test_note,
+            components=components,
         )
 
         self.log(f"  SHA-256: {digest}")
@@ -162,6 +169,21 @@ class ReleaseManager:
 
         return ReleaseResult(version=version, arch=arch, path=target,
                              sha256=digest, size=size)
+
+    def _thaw(self, path: Path) -> None:
+        """临时解除目录的写保护，供同版本的另一个架构写入。
+
+        只解目录自身的 immutable 与写权限，已发布文件的保护原样保留 ——
+        目的仅是让这个目录能再放进一个文件，而不是放开已有内容。
+        末尾的 _freeze 会把新旧文件一并重新冻上。
+        """
+        import subprocess
+
+        subprocess.run(["chattr", "-i", str(path)], capture_output=True, text=True)
+        try:
+            path.chmod(0o755)
+        except OSError:
+            pass
 
     def _freeze(self, path: Path) -> None:
         """冻结正式版本，使其不可修改也不可删除。

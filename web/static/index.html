@@ -673,6 +673,19 @@ async function loadReleases() {
   const [rel, art] = await Promise.all([api('/api/releases'), api('/api/artifacts')]);
 
   if (rel.ok && rel.data.releases && rel.data.releases.length) {
+    // 版本里装的是哪些组件、各自什么版本 —— 事后被问得最多的就是这个，
+    // 光有包名和校验和答不上来。
+    const relComponents = (r) => {
+      let c = {};
+      try { c = JSON.parse(r.components || '{}'); } catch (e) { c = {}; }
+      const names = Object.keys(c).sort();
+      if (!names.length) return '';
+      return `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">`
+        + names.map(n => `<span class="tag" style="font-family:var(--mono)">`
+            + `${n} <strong style="color:var(--text)">${c[n]}</strong></span>`).join('')
+        + `</div>`;
+    };
+
     $('#rel-list').innerHTML = rel.data.releases.map(r => `
       <div class="hist pass">
         <div class="row">
@@ -683,7 +696,8 @@ async function loadReleases() {
         </div>
         <div class="note" style="margin-top:4px;font-family:var(--mono);font-size:11px">
           ${r.filename}<br>sha256 ${r.sha256}</div>
-        ${r.test_note ? `<div class="note" style="margin-top:4px">实机测试：${r.test_note}</div>` : ''}
+        ${relComponents(r)}
+        ${r.test_note ? `<div class="note" style="margin-top:6px;white-space:pre-wrap;line-height:1.65">${r.test_note}</div>` : ''}
         <div class="row" style="margin-top:6px">
           <button onclick="getLink('${r.path ? r.path.replace(/'/g, "\\'") : ''}', true)">下载</button>
           <button onclick="getLink('${r.path ? r.path.replace(/'/g, "\\'") : ''}', false)">复制链接</button>

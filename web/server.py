@@ -1043,16 +1043,16 @@ class Handler(BaseHTTPRequestHandler):
                 "checklist": st, "can_force": True,
             }, 409)
 
-        # 测试说明由清单如实汇总：验过哪些、跳过哪些，都写进去
+        # 测试说明由清单如实汇总：验过哪些、跳过哪些，都写进去。
+        # coverage_note 本身已交代未验证的系统与数量，此处不再复述一遍 ——
+        # 同一件事说两遍只会让人怀疑是不是两回事。
         coverage = ck.coverage_note(st)
         if note:
             note = f"{note}\n\n{coverage}" if coverage else note
         else:
             note = coverage
         if force and st["pending"]:
-            note = (
-                f"【强制发布】{len(st['pending'])} 个系统未经真实机器验证。\n\n{note}"
-            )
+            note = f"【强制发布】\n\n{note}"
 
         try:
             result = self._release_manager().publish(

@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS releases (
     released_by   TEXT,
     released_at   TEXT NOT NULL,
     test_note     TEXT,
+    -- 该版本包含的组件与版本号（JSON）。发布记录若不写明这些，
+    -- 事后就答不出"v15 里的 redis 是哪个版本"这类最常被问到的问题。
+    components    TEXT,
     UNIQUE (version, arch)
 );
 
@@ -328,6 +331,16 @@ class BuildStore:
 
     # ── 正式版本 ────────────────────────────────────────────────────
 
+    def _ensure_release_columns(self, conn) -> None:
+        """为早于该字段的库补列。
+
+        建表语句只在库不存在时执行，已经建好的库不会因为改了 CREATE TABLE
+        就自动多出一列 —— 线上库是升级前建的，必须显式补。
+        """
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(releases)")}
+        if "components" not in cols:
+            conn.execute("ALTER TABLE releases ADD COLUMN components TEXT")
+
     def add_release(
         self,
         *,
@@ -340,21 +353,27 @@ class BuildStore:
         build_id: int | None = None,
         released_by: str = "",
         test_note: str = "",
+        components: dict[str, str] | None = None,
     ) -> int:
+        import json as _json
+
         with self._conn() as conn:
+            self._ensure_release_columns(conn)
             cur = conn.execute(
                 "INSERT INTO releases (version, arch, filename, path, sha256, size,"
-                " build_id, released_by, released_at, test_note)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " build_id, released_by, released_at, test_note, components)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     version, arch, filename, path, sha256, size, build_id,
                     released_by, datetime.now().isoformat(timespec="seconds"), test_note,
+                    _json.dumps(components or {}, ensure_ascii=False),
                 ),
             )
             return int(cur.lastrowid)
 
     def releases(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._conn() as conn:
+            self._ensure_release_columns(conn)
             return [
                 dict(r)
                 for r in conn.execute(
