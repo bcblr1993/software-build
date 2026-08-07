@@ -255,7 +255,7 @@
         <option value="x86_64">x86_64</option>
         <option value="aarch64">aarch64</option>
       </select>
-      <span class="note" id="ck-pkg"></span>
+      <select id="rel-pkg" style="max-width:380px"></select>
       <span style="flex:1"></span>
       <button id="ck-all-btn" style="font-size:12px;padding:4px 10px">全选</button>
       <button id="ck-none-btn" style="font-size:12px;padding:4px 10px">全不选</button>
@@ -919,14 +919,33 @@ $('#tg-del').onclick = async () => {
   loadChecklist();
 };
 
+// 该架构下的候选产物。发布哪一个由此处选定，而不是由系统按文件时间
+// 替人挑最新的 —— dist 里同时存着好几个包是常态，挑错了不会有任何提示。
+async function loadPkgOptions() {
+  const arch = $('#rel-arch').value;
+  const {ok, data} = await api('/api/artifacts');
+  const list = (ok && data.artifacts ? data.artifacts : [])
+    .filter(a => a.arch === arch)
+    .sort((a, b) => b.mtime - a.mtime);
+  const sel = $('#rel-pkg');
+  const prev = sel.value;
+  sel.innerHTML = list.length
+    ? list.map(a => `<option value="${a.path}">${a.name}（${(a.size/1048576).toFixed(0)} MB）</option>`).join('')
+    : '<option value="">该架构暂无候选产物</option>';
+  if (prev && list.some(a => a.path === prev)) sel.value = prev;
+  return sel.value;
+}
+
 async function loadChecklist() {
   const arch = $('#rel-arch').value;
   await loadMachines();
-  const {ok, data} = await api(`/api/checklist?arch=${encodeURIComponent(arch)}`);
+  const pkgPath = await loadPkgOptions();
+  const q = `/api/checklist?arch=${encodeURIComponent(arch)}`
+    + (pkgPath ? `&package=${encodeURIComponent(pkgPath.split('/').pop())}` : '');
+  const {ok, data} = await api(q);
   if (!ok) { $('#ck-body').innerHTML = '<p class="note">无法读取验证清单</p>'; return; }
   ckState = data;
 
-  $('#ck-pkg').textContent = data.package || '';
   $('#ck-progress').textContent = data.total
     ? `已实机验证 ${data.machine_checked} / ${data.total}`
     : '—';
@@ -1049,6 +1068,7 @@ $('#ck-none-btn').onclick = async () => {
 };
 
 $('#rel-arch').onchange = loadChecklist;
+$('#rel-pkg').onchange = loadChecklist;
 
 async function doRelease(force) {
   const arch = $('#rel-arch').value;
@@ -1063,8 +1083,9 @@ async function doRelease(force) {
       + `\n\n这些系统只通过了容器验证。发布说明中会如实标注，`
       + `已验证与未验证的系统会分别列出。\n\n确定继续？`;
     if (!confirm(msg)) return;
-  } else if (!confirm(`确定把 ${arch} 发布为 ${version}？正式版本发布后不可删除。`)) {
-    return;
+  } else {
+    const pkgName = ($('#rel-pkg').value || '').split('/').pop() || '(未选择)';
+    if (!confirm(`确定发布为 ${version}？\n\n架构：${arch}\n产物：${pkgName}\n\n正式版本发布后不可删除。`)) return;
   }
 
   $('#rel-btn').disabled = true;
@@ -1072,7 +1093,9 @@ async function doRelease(force) {
   $('#rel-msg').textContent = '正在发布…';
   // 测试说明由清单如实汇总：验过哪些、跳过哪些都写进去
   const {ok, data} = await api('/api/release',
-    {method: 'POST', body: JSON.stringify({arch, version, force: !!force})});
+    {method: 'POST', body: JSON.stringify({
+      arch, version, force: !!force, artifact: $('#rel-pkg').value || undefined,
+    })});
   $('#rel-msg').textContent = ok
     ? `${data.message}　sha256 ${data.sha256.slice(0,16)}…`
     : (data.error || '发布失败');
