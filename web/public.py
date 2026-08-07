@@ -57,8 +57,15 @@ class PublicView:
     # ── 对外数据 ────────────────────────────────────────────────────
 
     def releases(self) -> list[dict]:
-        """已发布的正式版本。全部默认可见。"""
-        out = []
+        """已发布的正式版本，按版本号归并。
+
+        同一个版本的两个架构本就是一次发布的两份产物，拆成两条读起来像
+        发了两个版本。归并后还有个额外好处：两个架构的组件差异会自己
+        显出来 —— ARM 的 jdk 是 8u351 而 x86 是 8u181，ARM 另有 compat，
+        分开列时这些差别淹没在两份几乎相同的清单里。
+        """
+        groups: dict[str, dict] = {}
+
         for r in self.store.releases(limit=50):
             path = Path(r.get("path") or "")
             if not path.is_file():
@@ -67,18 +74,42 @@ class PublicView:
                 comps = json.loads(r.get("components") or "{}")
             except (TypeError, ValueError):
                 comps = {}
-            out.append({
-                "version": r.get("version", ""),
+
+            version = r.get("version", "")
+            g = groups.setdefault(version, {
+                "version": version,
+                "released_at": "",
+                "verification": "",
+                "builds": [],
+            })
+            released_at = (r.get("released_at") or "")[:19].replace("T", " ")
+            # 两个架构发布时间通常差几分钟，取先发的那个作为版本发布时间
+            if not g["released_at"] or released_at < g["released_at"]:
+                g["released_at"] = released_at
+            if not g["verification"]:
+                g["verification"] = self._verification_brief(r.get("test_note") or "")
+
+            g["builds"].append({
                 "arch": r.get("arch", ""),
                 "filename": r.get("filename", ""),
                 "size": r.get("size", 0),
                 "sha256": r.get("sha256", ""),
-                "released_at": (r.get("released_at") or "")[:19].replace("T", " "),
                 "components": comps,
-                "verification": self._verification_brief(r.get("test_note") or ""),
                 # path 刻意不返回：它会暴露构建机的目录结构，
                 # 且下载链接一律由服务端签发，访客不需要也不应该拿到它。
             })
+
+        out = []
+        for g in groups.values():
+            g["builds"].sort(key=lambda b: b["arch"])
+            g["common"], _ = _split_components(g["builds"])
+            for b in g["builds"]:
+                b["extra"] = {
+                    k: v for k, v in b["components"].items()
+                    if g["common"].get(k) != v
+                }
+                b.pop("components", None)
+            out.append(g)
         return out
 
     def artifacts(self) -> list[dict]:
@@ -120,6 +151,22 @@ class PublicView:
         if skip:
             parts.append(f"{skip.group(1)} 个系统仅通过容器验证")
         return "，".join(parts)
+
+
+def _split_components(builds: list[dict]) -> tuple[dict, dict]:
+    """分出各架构共有的组件与各自特有的。
+
+    共有的提到版本一级只列一遍，特有的留在各架构行内 —— 否则同一份清单
+    要重复两遍，读的人还得自己逐项比对才能发现哪里不一样。
+    """
+    if not builds:
+        return {}, {}
+    common: dict[str, str] = {}
+    first = builds[0].get("components") or {}
+    for name, ver in first.items():
+        if all((b.get("components") or {}).get(name) == ver for b in builds[1:]):
+            common[name] = ver
+    return common, {}
 
 
 def _mtime_text(p: Path) -> str:

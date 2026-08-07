@@ -45,6 +45,16 @@
     padding: 3px 9px; border-radius: 4px; color: var(--muted);
   }
   .comp b { color: var(--text); font-weight: 600; }
+  .builds { margin-top: 14px; border-top: 1px solid var(--line); }
+  .build { padding: 14px 0 4px; border-bottom: 1px dashed var(--line); }
+  .build:last-child { border-bottom: none; }
+  .build-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .tag.arch {
+    font-family: var(--mono); font-weight: 600;
+    background: #e8f0fe; color: var(--accent);
+  }
+  .extra { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .extra b { color: var(--text); }
   .file {
     font-family: var(--mono); font-size: 11px; color: var(--muted);
     margin-top: 10px; word-break: break-all; line-height: 1.7;
@@ -139,14 +149,25 @@ async function load() {
     <div class="item">
       <div class="head">
         <span class="ver">${r.version}</span>
-        <span class="tag">${r.arch}</span>
         <span class="tag ok">正式版本</span>
-        <span class="meta">${r.released_at} · ${mb(r.size)}</span>
+        <span class="meta">${r.released_at}</span>
       </div>
-      ${comps(r.components)}
+      ${comps(r.common)}
       ${r.verification ? `<div class="verify">验证情况：${r.verification}</div>` : ''}
-      <div class="file">${r.filename}<br>sha256 ${r.sha256}</div>
-      ${acts(r.download)}
+      <div class="builds">
+        ${(r.builds || []).map(b => `
+          <div class="build">
+            <div class="build-head">
+              <span class="tag arch">${b.arch}</span>
+              ${Object.keys(b.extra || {}).length
+                ? `<span class="extra">${Object.keys(b.extra).sort().map(k =>
+                     `${k} <b>${b.extra[k]}</b>`).join(' · ')}</span>` : ''}
+              <span class="meta">${mb(b.size)}</span>
+            </div>
+            <div class="file">${b.filename}<br>sha256 ${b.sha256}</div>
+            ${acts(b.download)}
+          </div>`).join('')}
+      </div>
     </div>`).join('') : '<p class="empty">尚无正式版本</p>';
 
   const art = data.artifacts || [];

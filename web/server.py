@@ -930,9 +930,12 @@ class Handler(BaseHTTPRequestHandler):
 
         releases = pv.releases()
         for r in releases:
-            if (Path(self.server.workspace) / "releases" / r["version"] / r["filename"]).is_file():
-                r["download"] = self._sign_public(
-                    auth, "release", r["version"], r["filename"], host)
+            for b in r.get("builds", []):
+                full = (Path(self.server.workspace) / "releases"
+                        / r["version"] / b["filename"])
+                if full.is_file():
+                    b["download"] = self._sign_public(
+                        auth, "release", r["version"], b["filename"], host)
 
         artifacts = pv.artifacts()
         for a in artifacts:
