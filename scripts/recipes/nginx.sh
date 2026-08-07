@@ -58,7 +58,40 @@ make -j"$JOBS"
 rm -rf "$DEST"
 mkdir -p "$DEST/sbin" "$DEST/lib" "$DEST/logs"
 
-install -m 0755 objs/nginx "$DEST/sbin/nginx"
+install -m 0755 objs/nginx "$DEST/sbin/nginx.bin"
+
+# nginx 的 --prefix 在编译期焊死，而现场的用户名与安装路径并不确定
+# （实测现场有装在 /home/nusp/sprixinSoft 的）。直接执行 sbin/nginx 时
+# 它按编译期路径去找 conf 与 logs，报 "open() /home/sprixin/nginx/conf/
+# nginx.conf failed" —— 包明明就在眼前，却说找不到配置。
+#
+# 故把真二进制留作 nginx.bin，同名位置放一个包装脚本，按自身位置推算出
+# 真实路径再补上 -p/-c/-e。运维照旧敲 ./nginx；startup.sh 传入的同名参数
+# 排在 "$@" 更后，仍以它为准，行为与此前一致。
+cat > "$DEST/sbin/nginx" <<'WRAPPER'
+#!/bin/bash
+#
+# 按脚本自身位置推算安装路径，替代编译期焊死的 --prefix。
+# 详见构建配方 scripts/recipes/nginx.sh 中的说明。
+D="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+R="$(CDPATH= cd -- "$D/.." && pwd)"
+mkdir -p "$R/logs/nginx" 2>/dev/null
+
+# 以 root 运行时 nginx 会把 worker 切到编译期内置的 nobody:nobody，
+# 而 Debian 系（凝思等）只有 nogroup 没有 nobody 组，getgrnam 失败会
+# 直接拒绝启动。普通用户运行时该指令本就被忽略，故这段只在 root 下生效。
+G=""
+if [ "$(id -u)" = 0 ] && ! getent group nobody >/dev/null 2>&1; then
+  for g in nogroup daemon; do
+    if getent group "$g" >/dev/null 2>&1; then G="user nobody $g;"; break; fi
+  done
+fi
+
+exec "$D/sbin/nginx.bin" \
+  -p "$D" -c "$D/conf/nginx.conf" -e "$R/logs/nginx/error.log" \
+  ${G:+-g "$G"} "$@"
+WRAPPER
+chmod 0755 "$DEST/sbin/nginx"
 
 # 配置与静态文件：优先继承基准包，保证现场行为不变
 if [ -n "$BASE_PACKAGE" ] && [ -d "$BASE_PACKAGE/conf" ]; then
@@ -94,13 +127,13 @@ done
 
 # ── 自检 ────────────────────────────────────────────────────────────
 log "自检"
-"$DEST/sbin/nginx" -v 2>&1 || true
+"$DEST/sbin/nginx.bin" -v 2>&1 || true
 
 echo "RUNPATH:"
-readelf -d "$DEST/sbin/nginx" | grep -E 'RUNPATH|RPATH' || echo "  (无 —— ABI 门禁将拦截)"
+readelf -d "$DEST/sbin/nginx.bin" | grep -E 'RUNPATH|RPATH' || echo "  (无 —— ABI 门禁将拦截)"
 
 echo "DT_NEEDED:"
-readelf -d "$DEST/sbin/nginx" | awk '/NEEDED/ {gsub(/[\[\]]/,"",$5); print "  " $5}'
+readelf -d "$DEST/sbin/nginx.bin" | awk '/NEEDED/ {gsub(/[\[\]]/,"",$5); print "  " $5}'
 
 echo
 echo "产物: $DEST"

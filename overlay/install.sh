@@ -85,4 +85,31 @@ rm -f install.log startup.log shutdown.log 2>/dev/null
 
 mkdir -p logs/redis logs/nginx logs/nacos logs/influxdb logs/rabbitmq
 sleep 2
+
+# 检查 nginx.conf 中指向包外的绝对路径是否存在。
+#
+# 现场的用户名与安装路径并不固定（已见到装在 /home/nusp 下的），而
+# nginx.conf 里的 alias 指向的是业务数据目录（如 /home/sprixin/rendergraph），
+# 它在安装包之外，无从自动修正。这类路径失效时 nginx 照常启动、端口照常
+# 监听，只有访问到对应 location 时才 404 —— 那时排查起来要费不少工夫，
+# 不如安装完就说清楚。
+missing=""
+if [[ -f nginx/conf/nginx.conf ]]; then
+   while read -r p; do
+      [[ -n "$p" ]] || continue
+      [[ -e "$p" ]] && continue
+      case " $missing " in *" $p "*) continue ;; esac
+      missing="$missing $p"
+   done < <(grep -oE '(alias|root)[[:space:]]+/[^;[:space:]]+' nginx/conf/nginx.conf 2>/dev/null \
+            | awk '{print $2}' | sed 's#/$##' | sort -u)
+fi
+
+if [[ -n "$missing" ]]; then
+   echo
+   echo "提示：nginx.conf 中以下路径在本机不存在，相关页面会返回 404："
+   for p in $missing; do echo "    $p"; done
+   echo "  这些是包外的业务数据目录。若本机用户名或部署路径与之不同，"
+   echo "  请据实修改 nginx/conf/nginx.conf 后再启动。"
+fi
+
 echo "-------------------~软件包安装成功,请执行startup.sh启动相关服务~------------------"

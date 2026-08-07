@@ -150,7 +150,7 @@ fi
 echo
 echo "── 依赖完整性 ──"
 check_deps "redis 依赖"      "redis/bin/redis-server"
-check_deps "nginx 依赖"      "nginx/sbin/nginx"
+check_deps "nginx 依赖"      "nginx/sbin/nginx.bin"
 check_deps "keepalived 依赖" "keepalived/sbin/keepalived"
 if [ -n "$ERTS_DIR" ] && [ -x "$ERTS_DIR/bin/beam.smp" ]; then
   check_deps "rabbitmq beam 依赖" "$ERTS_DIR/bin/beam.smp"

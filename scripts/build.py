@@ -287,7 +287,8 @@ def cmd_build(args, cfg: Config, ws: Workspace) -> int:
     fetcher = Fetcher(ws.cache, log=log, repo_root=REPO_ROOT)
     try:
         results = fetcher.fetch_all(
-            cfg, arch, skip=set(find_uploads(ws, cfg, arch))
+            cfg, arch, skip=set(find_uploads(ws, cfg, arch)),
+            only=set(args.component) if args.component else None,
         )
     except FetchError as exc:
         log(f"\n{exc}")

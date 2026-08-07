@@ -195,13 +195,18 @@ class Fetcher:
     # ── 批量 ────────────────────────────────────────────────────────
 
     def fetch_all(
-        self, cfg: Config, arch: str, skip: set[str] | None = None
+        self, cfg: Config, arch: str, skip: set[str] | None = None,
+        only: set[str] | None = None,
     ) -> list[FetchResult]:
         """获取指定架构所需的全部上游归档。
 
         skip 用于排除已有上传件的组件：nacos 与 influxdb 允许自行改好后
         上传，打包时用的就是上传的那一份，再把上游原版拉一遍纯属白费 ——
         nacos 单个就有 200MB，在内网 1M 出口上要半小时。
+
+        only 用于只编译个别组件的场合。此前无论要编译什么都会遍历全部
+        上游，于是"只重编 nginx"也要去取 rabbitmq 的签名，一次网络抖动
+        就把整个构建带崩 —— 而那个组件根本没打算动。
         """
         results: list[FetchResult] = []
         ups = getattr(cfg, "upstreams", {}) or {}
@@ -212,6 +217,8 @@ class Fetcher:
             results.append(self._fetch_lib(lib, ups))
 
         comps = [c for c in cfg.components.values() if not c.local_only]
+        if only:
+            comps = [c for c in comps if c.name in only]
         self.log(f"组件（{len(comps)} 项，架构 {arch}）")
         for comp in comps:
             if comp.name in skip:

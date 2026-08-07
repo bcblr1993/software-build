@@ -63,7 +63,9 @@ components:
       - --with-http_v2_module
     vendor: [openssl, pcre2, zlib]
     # 安装后二进制位置，供 abi-gate 与 verify 定位
-    artifacts: [sbin/nginx]
+    # 真二进制为 nginx.bin；同名的 sbin/nginx 是包装脚本，
+    # 负责按实际安装路径补上 -p/-c/-e，详见配方中的说明。
+    artifacts: [sbin/nginx.bin]
 
   redis:
     build: compile

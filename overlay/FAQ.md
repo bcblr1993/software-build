@@ -73,6 +73,37 @@ Debian 系（凝思等）只有 `nogroup` 而没有 `nobody` 组，故 root 下�
 ./nginx/sbin/nginx -g 'user nobody nogroup;' -c "$PWD/nginx/conf/nginx.conf" -p "$PWD/nginx"
 ```
 
+### 直接执行 `./nginx` 报找不到配置文件
+
+形如：
+
+```
+nginx: [emerg] open() "/home/sprixin/nginx/conf/nginx.conf" failed (2: No such file or directory)
+```
+
+nginx 的 `--prefix` 在编译期就固定了，而现场的用户名与安装路径各不相同
+（见过装在 `/home/nusp/sprixinSoft` 下的）。直接执行时它按编译期路径去找
+配置，自然找不到。
+
+v14 之后 `sbin/nginx` 已改为包装脚本，会按自身位置推算真实路径，直接执行
+即可；真二进制是同目录下的 `nginx.bin`。若在更早的版本上遇到，显式指定路径：
+
+```bash
+./nginx.bin -p "$PWD/.." -c "$PWD/../conf/nginx.conf" -e "$PWD/../../logs/nginx/error.log" -t
+```
+
+用 `startup.sh` 启动则一直不受影响 —— 它本来就传了这些参数。
+
+### 换了用户名或安装路径，包还能用吗
+
+能。包内组件一律按脚本自身位置推算路径，不依赖固定的用户名或安装目录。
+已实测在 `zhangsan` 用户、`/srv/company-apps/sprixinSoft` 路径下正常启动。
+
+唯一需要人工过问的是 `nginx/conf/nginx.conf` 里指向**包外**业务数据目录的
+`alias`／`root`（如 `/home/sprixin/rendergraph/...`）。这些路径在安装包之外，
+无从自动修正；`install.sh` 会在安装完成时列出本机不存在的那些，据实修改即可。
+不改也不影响服务启动，只是对应页面会 404。
+
 ### 服务起不来，报某个 `.so` 找不到
 
 先跑自检定位：
