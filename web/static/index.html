@@ -713,10 +713,21 @@ async function loadReleases() {
         <span class="tag">${a.arch}</span>
         <span style="font-size:13px;flex:1">${a.name}</span>
         <span class="note">${(a.size/1048576).toFixed(0)} MB</span>
+        <label class="row" style="gap:5px;font-size:12px;color:var(--muted)"
+               title="勾选后访客页面可见并可下载">
+          <input type="checkbox" data-pub="${a.name}" ${a.public ? 'checked' : ''}> 对访客公开
+        </label>
         <button onclick="getLink('${a.path.replace(/'/g, "\\'")}', true)">下载</button>
         <button onclick="getLink('${a.path.replace(/'/g, "\\'")}', false)">复制链接</button>
         <button onclick="deleteArtifact('${a.path.replace(/'/g, "\\'")}')">删除</button>
       </div>`).join('');
+    document.querySelectorAll('#art-list input[data-pub]').forEach(cb => {
+      cb.onchange = async () => {
+        const {ok, data} = await api('/api/artifacts/publish', {method: 'POST',
+          body: JSON.stringify({filename: cb.dataset.pub, public: cb.checked})});
+        if (!ok) { alert(data.error || '操作失败'); cb.checked = !cb.checked; }
+      };
+    });
   } else {
     $('#art-list').innerHTML = '<p class="note">暂无候选产物</p>';
   }

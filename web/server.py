@@ -320,6 +320,13 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/static/"):
             return self._serve_static(route[len("/static/"):])
 
+        if route == "/guest" or route == "/guest/":
+            return self._serve_static("guest.html")
+        if route == "/api/public":
+            return self._api_public_data()
+        if route == "/download/public":
+            return self._api_public_download()
+
         if route == "/api/status":
             return self._send_json({
                 "bound": self.server.auth.is_bound,
@@ -399,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_member_remove(body)
         if route == "/api/checklist/mark":
             return self._api_checklist_mark(body)
+        if route == "/api/artifacts/publish":
+            return self._api_artifact_publish(body)
         if route == "/api/machines/save":
             return self._api_machine_save(body)
         if route == "/api/machines/delete":
@@ -838,12 +847,18 @@ class Handler(BaseHTTPRequestHandler):
             } for r in rels
         ]})
 
+    def _public_names(self) -> set[str]:
+        return self._public_view().published_names()
+
     def _api_artifacts(self) -> None:
         """候选产物。正式版本不在其中，因而不会被误删。"""
         try:
             items = self._release_manager().deletable()
         except Exception as exc:  # noqa: BLE001
             return self._send_json({"error": str(exc)}, 500)
+        public = self._public_names()
+        for it in items:
+            it["public"] = it.get("name") in public
         self._send_json({"artifacts": items})
 
     def _checklist(self):
@@ -894,6 +909,108 @@ class Handler(BaseHTTPRequestHandler):
         )
         arch = str(body.get("arch") or "x86_64").strip()
         self._send_json({"ok": True, "status": self._checklist().status(arch, pkg)})
+
+    # ── 访客视图（无需登录）────────────────────────────────────────
+
+    def _public_view(self):
+        from public import PublicView
+
+        return PublicView(Path(self.server.workspace), self.server.store)
+
+    def _api_public_data(self) -> None:
+        """访客页面所需的全部数据。
+
+        这是整套系统里唯一不校验会话的数据接口，因此只返回 PublicView
+        组装过的字段 —— 服务器路径、目标机凭据、成员名单、构建日志
+        都不在其中。下载链接在此一并签发，访客无须也无法自行指定路径。
+        """
+        pv = self._public_view()
+        auth = self.server.auth
+        host = self.headers.get("Host") or "localhost"
+
+        releases = pv.releases()
+        for r in releases:
+            if (Path(self.server.workspace) / "releases" / r["version"] / r["filename"]).is_file():
+                r["download"] = self._sign_public(
+                    auth, "release", r["version"], r["filename"], host)
+
+        artifacts = pv.artifacts()
+        for a in artifacts:
+            if (Path(self.server.workspace) / "dist" / a["arch"] / a["filename"]).is_file():
+                a["download"] = self._sign_public(
+                    auth, "artifact", a["arch"], a["filename"], host)
+
+        self._send_json({
+            "package": "sprixinSoft",
+            "releases": releases,
+            "artifacts": artifacts,
+        })
+
+    def _sign_public(self, auth, kind: str, key: str, filename: str, host: str) -> dict:
+        """签发访客下载链接。
+
+        刻意不用管理端那套以绝对路径为凭据的链接：它会把
+        /root/sprixin-build/... 原样带到访客面前，白白泄露构建机的目录
+        结构。这里只签「类别 + 版本或架构 + 文件名」，服务端据此在既定的
+        两个目录内组装路径，访客既看不到也指定不了别处。
+
+        访客不像管理员能随时重新生成链接，有效期给长一些。
+        """
+        sig, expiry = auth.sign_download(f"public:{kind}:{key}:{filename}", ttl=7 * 86400)
+        query = urllib.parse.urlencode({
+            "kind": kind, "key": key, "name": filename, "exp": expiry, "sig": sig,
+        })
+        url = f"http://{host}/download/public?{query}"
+        return {"url": url, "curl": f"curl -fL -o '{filename}' '{url}'"}
+
+    def _api_public_download(self) -> None:
+        """访客下载。只认 releases/<版本>/ 与已公开的 dist/<架构>/。"""
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        kind = (params.get("kind") or [""])[0]
+        key = (params.get("key") or [""])[0]
+        name = (params.get("name") or [""])[0]
+        expiry = (params.get("exp") or [""])[0]
+        sig = (params.get("sig") or [""])[0]
+
+        ok, why = self.server.auth.verify_download(
+            f"public:{kind}:{key}:{name}", expiry, sig
+        )
+        if not ok:
+            return self._send_json({"error": why}, 403)
+
+        # 组装路径前先挡住穿越：这几个值来自 URL，虽有签名保护，
+        # 但签名只保证"没被改过"，不保证"内容是安全的"。
+        if not name or "/" in name or ".." in name or "/" in key or ".." in key:
+            return self._send_json({"error": "参数不合法"}, 400)
+
+        ws = Path(self.server.workspace)
+        if kind == "release":
+            target = ws / "releases" / key / name
+        elif kind == "artifact":
+            if name not in self._public_view().published_names():
+                return self._send_json({"error": "该产物未公开"}, 403)
+            target = ws / "dist" / key / name
+        else:
+            return self._send_json({"error": "参数不合法"}, 400)
+
+        target = target.resolve()
+        allowed = [(ws / "releases").resolve(), (ws / "dist").resolve()]
+        if not any(str(target).startswith(str(a) + "/") for a in allowed):
+            return self._send_json({"error": "参数不合法"}, 400)
+        if not target.is_file():
+            return self._send_json({"error": "文件不存在"}, 404)
+
+        self._stream_file(target)
+
+    def _api_artifact_publish(self, body: dict) -> None:
+        """管理员切换某个候选产物对访客的可见性。"""
+        if self._require_auth() is None:
+            return
+        name = str(body.get("filename") or "").strip()
+        if not name:
+            return self._send_json({"error": "缺少文件名"}, 400)
+        self._public_view().set_published(name, bool(body.get("public")))
+        self._send_json({"ok": True})
 
     # ── 目标机器管理与远程实机验证 ──────────────────────────────────
 
@@ -1162,11 +1279,17 @@ class Handler(BaseHTTPRequestHandler):
         target = self._resolve_artifact(raw)
         if target is None:
             return self._send_json({"error": "文件不存在"}, 404)
+        self._stream_file(target)
 
+    def _stream_file(self, target: Path) -> None:
+        """把文件发出去，支持断点续传。
+
+        管理端与访客端共用：几百 MB 的包在弱网下断一次就得重来，
+        两边都需要 Range 支持，没有理由各写一份。
+        """
         size = target.stat().st_size
         start, end = 0, size - 1
 
-        # 支持断点续传：几百 MB 的包在弱网下断一次就得重来，代价太大
         rng = self.headers.get("Range", "")
         partial = False
         m = re.match(r"bytes=(\d*)-(\d*)", rng or "")

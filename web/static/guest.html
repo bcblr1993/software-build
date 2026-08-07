@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SprixinSoft 版本发布</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --line: #e3e6ea;
+    --text: #1c2024; --muted: #6b7280; --accent: #1f6feb;
+    --ok: #1a7f4b; --warn: #9a6400;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 16px 24px;
+  }
+  header h1 { font-size: 17px; font-weight: 600; margin: 0; }
+  header p { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+  main { max-width: 940px; margin: 0 auto; padding: 24px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  .item {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 18px 20px; margin-bottom: 12px;
+  }
+  .item.candidate { border-left: 3px solid var(--warn); }
+  .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .ver { font-size: 17px; font-weight: 600; }
+  .tag {
+    display: inline-block; padding: 2px 9px; border-radius: 4px;
+    font-size: 12px; background: #eef1f5; color: var(--muted);
+  }
+  .tag.ok { background: #e7f6ed; color: var(--ok); }
+  .tag.warn { background: #fdf4e3; color: var(--warn); }
+  .meta { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .comps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .comp {
+    font-family: var(--mono); font-size: 12px; background: #f2f4f7;
+    padding: 3px 9px; border-radius: 4px; color: var(--muted);
+  }
+  .comp b { color: var(--text); font-weight: 600; }
+  .file {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    margin-top: 10px; word-break: break-all; line-height: 1.7;
+  }
+  .verify { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .warnbox {
+    background: #fdf4e3; color: var(--warn); font-size: 12px;
+    padding: 10px 12px; border-radius: 6px; margin-top: 10px; line-height: 1.6;
+  }
+  .acts { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
+  button {
+    font: inherit; font-size: 13px; padding: 6px 14px; border-radius: 6px;
+    cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--text);
+  }
+  button:hover { background: #f2f4f7; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .msg { font-size: 12px; color: var(--ok); }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px 0 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>SprixinSoft 版本发布</h1>
+  <p>离线安装包，适配凝思 / 麒麟 / 麒麟信安 / CentOS / Anolis 等系统，x86_64 与 aarch64 双架构</p>
+</header>
+
+<main>
+  <h2>正式版本</h2>
+  <p class="sub">已通过验证并正式发布，可用于现场部署</p>
+  <div id="releases"><p class="empty">加载中…</p></div>
+
+  <div id="candidates-wrap" style="margin-top:28px;display:none">
+    <h2>测试版本</h2>
+    <p class="sub">尚未正式发布的构建产物，仅供测试</p>
+    <div id="candidates"></div>
+  </div>
+</main>
+
+<footer id="foot"></footer>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const mb = (n) => (n / 1048576).toFixed(0) + ' MB';
+
+function comps(c) {
+  const names = Object.keys(c || {}).sort();
+  if (!names.length) return '';
+  return `<div class="comps">${names.map(n =>
+    `<span class="comp">${n} <b>${c[n]}</b></span>`).join('')}</div>`;
+}
+
+// 下载命令由服务端连同数据一并签发，此处只负责放进剪贴板。
+// 访客不传路径，也就无从要求下载任意文件。
+function copy(text, btn) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+    const tip = btn.parentElement.querySelector('.msg');
+    if (tip) { tip.textContent = '已复制下载命令'; setTimeout(() => tip.textContent = '', 2500); }
+  } catch (e) { /* 剪贴板不可用时忽略，用户仍可点下载 */ }
+  document.body.removeChild(ta);
+}
+
+function acts(d) {
+  if (!d) return '';
+  return `<div class="acts">
+    <button class="primary" onclick="location.href='${d.url}'">下载</button>
+    <button onclick="copy(${JSON.stringify(d.curl).replace(/"/g, '&quot;')}, this)">复制下载命令</button>
+    <span class="msg"></span>
+  </div>`;
+}
+
+async function load() {
+  let data;
+  try {
+    const r = await fetch('/api/public');
+    data = await r.json();
+  } catch (e) {
+    $('#releases').innerHTML = '<p class="empty">无法连接服务</p>';
+    return;
+  }
+
+  const rel = data.releases || [];
+  $('#releases').innerHTML = rel.length ? rel.map(r => `
+    <div class="item">
+      <div class="head">
+        <span class="ver">${r.version}</span>
+        <span class="tag">${r.arch}</span>
+        <span class="tag ok">正式版本</span>
+        <span class="meta">${r.released_at} · ${mb(r.size)}</span>
+      </div>
+      ${comps(r.components)}
+      ${r.verification ? `<div class="verify">验证情况：${r.verification}</div>` : ''}
+      <div class="file">${r.filename}<br>sha256 ${r.sha256}</div>
+      ${acts(r.download)}
+    </div>`).join('') : '<p class="empty">尚无正式版本</p>';
+
+  const art = data.artifacts || [];
+  if (art.length) {
+    $('#candidates-wrap').style.display = '';
+    $('#candidates').innerHTML = art.map(a => `
+      <div class="item candidate">
+        <div class="head">
+          <span class="ver" style="font-size:15px">${a.filename}</span>
+          <span class="tag warn">测试版本</span>
+          <span class="meta">${a.built_at} · ${mb(a.size)}</span>
+        </div>
+        <div class="warnbox">
+          这是尚未正式发布的构建产物，未完成全部验证，请勿用于生产环境。
+        </div>
+        ${acts(a.download)}
+      </div>`).join('');
+  }
+
+  $('#foot').textContent = `共 ${rel.length} 个正式版本`
+    + (art.length ? `，${art.length} 个测试版本` : '');
+}
+
+load();
+</script>
+</body>
+</html>
