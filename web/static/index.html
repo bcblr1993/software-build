@@ -168,6 +168,9 @@
   <span class="meta" id="pkg-meta"></span>
   <span class="spacer"></span>
   <span class="meta" id="busy-state"></span>
+  <button id="guest-open" title="在新标签页打开访客页面">访客页面</button>
+  <button id="guest-copy" title="复制访客页面链接，可直接发给同事">复制链接</button>
+  <span class="note" id="guest-msg"></span>
   <button id="logout">退出</button>
 </header>
 
@@ -447,6 +450,29 @@ $('#gate-btn').onclick = async () => {
 };
 
 $('#code').addEventListener('keydown', e => { if (e.key === 'Enter') $('#gate-btn').click(); });
+
+// 访客页面入口。用当前浏览器地址栏的 origin 拼链接 —— 服务端看到的
+// Host 可能是 127.0.0.1，那种链接发给同事是打不开的。
+const guestURL = () => `${location.origin}/guest`;
+
+$('#guest-open').onclick = () => window.open(guestURL(), '_blank');
+
+$('#guest-copy').onclick = () => {
+  const ta = document.createElement('textarea');
+  ta.value = guestURL();
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+    $('#guest-msg').textContent = '已复制 ' + guestURL();
+    setTimeout(() => $('#guest-msg').textContent = '', 4000);
+  } catch (e) {
+    $('#guest-msg').textContent = guestURL();
+  }
+  document.body.removeChild(ta);
+};
 
 $('#logout').onclick = async () => { await api('/api/logout', {method: 'POST'}); location.reload(); };
 
