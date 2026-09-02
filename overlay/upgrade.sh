@@ -130,11 +130,21 @@ info "当前该目录下运行中的进程：$RUNNING 个"
 # ── 2. 迁移清单 ─────────────────────────────────────────────────────
 step "确定迁移清单"
 
-# 数据目录：必须带到新版本，否则历史配置与队列定义会丢
+# 数据目录：必须带到新版本，否则历史数据会丢。
+#
+# 只迁真正无法重建的那部分。常升的是 nginx / redis / rabbitmq / nacos，
+# 其中真正有状态、且丢了补不回来的只有 nacos 的 derby-data：
+#
+#   nacos/data/derby-data  配置中心的实际数据，必须迁
+#   nacos/data/naming      服务注册信息
+#   influxdb               时序数据（升级频率低，但有就带上）
+#
+# 刻意不迁 rabbitmq 的 mnesia：现场的队列与交换机由应用启动时自行
+# 声明创建，丢了会自愈；而跨版本的 mnesia 未必被新版接受，迁过去反倒
+# 可能让节点起不来。不迁则新版以空状态启动，应用重连后照常重建。
 DATA_PATHS="
 nacos/data/derby-data
 nacos/data/naming
-rabbitmq/var/lib/rabbitmq/mnesia
 influxdb/var/lib/influxdb
 "
 # 配置文件：以现场为准，逐一覆盖新包中的同名文件
@@ -157,9 +167,14 @@ done
 for f in $ROOT_FILES; do
   [ -f "$CURRENT/$f" ] && info "数据 $f  ($(du -sh "$CURRENT/$f" | cut -f1))"
 done
+if [ -d "$CURRENT/rabbitmq/var/lib/rabbitmq/mnesia" ]; then
+  info "跳过 rabbitmq mnesia —— 队列与交换机由应用启动时自行声明，"
+  info "     不迁可避开跨版本 mnesia 不兼容导致节点起不来的风险。"
+fi
 if [ -d "$CURRENT/nacos/data/protocol" ]; then
   sz=$(du -sh "$CURRENT/nacos/data/protocol" 2>/dev/null | cut -f1)
-  info "跳过 nacos/data/protocol ($sz) —— JRaft 日志，重启后自行重建"
+  info "跳过 nacos/data/protocol ($sz) —— JRaft 协议日志，重启后自行重建。"
+  info "     现场实测它占了 nacos 数据的 97%，迁过去既慢又没有意义。"
 fi
 
 # ── 3. 解包 ─────────────────────────────────────────────────────────
@@ -218,6 +233,10 @@ done
 [ "$DIFF_FOUND" = 0 ] && ok "配置与新版默认一致，无需人工判断"
 [ "$DIFF_FOUND" = 1 ] && info "新版默认配置已另存为同名 .new-default，可对照是否有新增项"
 
+# v14 起 sbin/nginx 是包装脚本、真二进制为 nginx.bin。新包自带这套结构，
+# 无需特殊处理；但若回滚到 v13 及更早的版本，那边仍是单个二进制 ——
+# 回滚提示里会写清楚切回哪个目录，按目录整体切换即可，不必关心内部差异。
+
 # nginx 的 html 与其他自定义内容一并带过来
 if [ -d "$CURRENT/nginx/html" ] && [ -d "$NEW_DIR/nginx" ]; then
   rm -rf "$NEW_DIR/nginx/html"
@@ -228,7 +247,7 @@ fi
 # ── 6. 确认 ─────────────────────────────────────────────────────────
 step "即将停服切换"
 info "停机窗口从现在开始，预计 1-3 分钟"
-info "回滚方式：ln -sfn $(basename "$CURRENT_REAL_HINT:-旧目录") $LINK 后重新启动"
+info "旧版本会完整保留，出问题可随时切回（完成后会给出回滚命令）"
 if [ "$ASSUME_YES" != 1 ]; then
   printf '   确认继续？[y/N] '
   read -r ans

@@ -226,3 +226,4 @@ overlay_files:
   - logs.sh
   - KEEPALIVED-USAGE.md
   - FAQ.md
+  - upgrade.sh
