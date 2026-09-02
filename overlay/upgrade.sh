@@ -147,13 +147,32 @@ nacos/data/derby-data
 nacos/data/naming
 influxdb/var/lib/influxdb
 "
-# 配置文件：以现场为准，逐一覆盖新包中的同名文件
-CONF_PATHS="
-nginx/conf/nginx.conf
+# 配置目录：以现场为准。整目录合并而非逐个文件 —— 现场同名文件覆盖新包，
+# 新包独有的文件保留下来，这样新版本引入的配置项不会因为整目录替换而丢失。
+#
+# 逐项说明为何都要带走：
+#
+#   nginx/conf     nginx.conf 是现场定制的（监听端口、业务 alias），
+#                  同目录还有 mime.types、fastcgi_params 等可能一并改过
+#   nginx/html     现场自己放的页面
+#   redis          redis.conf 里有 requirepass
+#   rabbitmq/etc   rabbitmq.conf 里声明了 default_user / default_pass，
+#                  mnesia 为空时 RabbitMQ 会照它重建用户 —— 这正是不迁
+#                  mnesia 也不会丢账号的原因；enabled_plugins 也在这里
+#   nacos/conf     application.properties 等配置
+#   influxdb/etc   influxdb.conf
+#   keepalived/etc keepalived.conf
+CONF_DIRS="
+nginx/conf
+nginx/html
+rabbitmq/etc/rabbitmq
+nacos/conf
+influxdb/etc/influxdb
+keepalived/etc/keepalived
+"
+# 单个配置文件（其所在目录还有程序自身的内容，不宜整目录合并）
+CONF_FILES="
 redis/redis.conf
-influxdb/etc/influxdb/influxdb.conf
-keepalived/etc/keepalived/keepalived.conf
-nacos/conf/application.properties
 "
 # 顶层数据文件（进程 cwd 即安装根目录，故 redis 的 rdb 落在这里）
 ROOT_FILES="dump.rdb appendonly.aof"
@@ -218,31 +237,51 @@ done
 # ── 5. 迁移配置并列出差异 ───────────────────────────────────────────
 step "迁移配置（以现场为准）"
 DIFF_FOUND=0
-for p in $CONF_PATHS; do
-  src="$CURRENT/$p"
-  dst="$NEW_DIR/$p"
-  [ -f "$src" ] || continue
+
+# 逐个文件比对并覆盖。差异打印出来，新版默认另存一份供对照 ——
+# 新版本若引入了必需的配置项，不至于被默默盖掉而无人察觉。
+migrate_conf_file() {
+  local src="$1" dst="$2" label="$3"
+  [ -f "$src" ] || return 0
   if [ -f "$dst" ] && ! diff -q "$src" "$dst" >/dev/null 2>&1; then
     DIFF_FOUND=1
-    warn "$p 与新版默认配置不同，采用现场版本；差异如下："
-    diff -u "$dst" "$src" 2>/dev/null | sed -n '3,23p' | sed 's/^/       /'
-    cp -a "$dst" "$dst.new-default"    # 新版默认留一份，便于对照新增项
+    warn "$label 与新版默认不同，采用现场版本；差异如下："
+    diff -u "$dst" "$src" 2>/dev/null | sed -n '3,20p' | sed 's/^/       /'
+    cp -a "$dst" "$dst.new-default"
   fi
-  cp -a "$src" "$dst" || die "配置迁移失败: $p"
+  mkdir -p "$(dirname "$dst")"
+  cp -a "$src" "$dst" || die "配置迁移失败: $label"
+}
+
+for d in $CONF_DIRS; do
+  [ -d "$CURRENT/$d" ] || continue
+  mkdir -p "$NEW_DIR/$d"
+  # 合并而非替换：现场文件覆盖同名，新包独有的留着
+  count=0
+  while IFS= read -r rel; do
+    rel="${rel#./}"
+    migrate_conf_file "$CURRENT/$d/$rel" "$NEW_DIR/$d/$rel" "$d/$rel"
+    count=$((count + 1))
+  done < <(cd "$CURRENT/$d" && find . -type f | sed 's|^\./||')
+  ok "$d（$count 个文件）"
 done
+
+for f in $CONF_FILES; do
+  migrate_conf_file "$CURRENT/$f" "$NEW_DIR/$f" "$f"
+  [ -f "$CURRENT/$f" ] && ok "$f"
+done
+
 [ "$DIFF_FOUND" = 0 ] && ok "配置与新版默认一致，无需人工判断"
 [ "$DIFF_FOUND" = 1 ] && info "新版默认配置已另存为同名 .new-default，可对照是否有新增项"
+
+# rabbitmq 账号随 rabbitmq.conf 一并带走，无需迁 mnesia
+if grep -q "default_user" "$NEW_DIR/rabbitmq/etc/rabbitmq/rabbitmq.conf" 2>/dev/null; then
+  info "rabbitmq 账号在 rabbitmq.conf 中声明，新节点首次启动会照此重建"
+fi
 
 # v14 起 sbin/nginx 是包装脚本、真二进制为 nginx.bin。新包自带这套结构，
 # 无需特殊处理；但若回滚到 v13 及更早的版本，那边仍是单个二进制 ——
 # 回滚提示里会写清楚切回哪个目录，按目录整体切换即可，不必关心内部差异。
-
-# nginx 的 html 与其他自定义内容一并带过来
-if [ -d "$CURRENT/nginx/html" ] && [ -d "$NEW_DIR/nginx" ]; then
-  rm -rf "$NEW_DIR/nginx/html"
-  cp -a "$CURRENT/nginx/html" "$NEW_DIR/nginx/html"
-  ok "nginx/html"
-fi
 
 # ── 6. 确认 ─────────────────────────────────────────────────────────
 step "即将停服切换"
