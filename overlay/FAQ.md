@@ -266,6 +266,19 @@ rabbitmq 是例外：它的 `mnesia` 不迁，升级后是一个空库。队列�
 应用启动时自行声明，会自愈；账号则按 `rabbitmq.conf` 重建，不会丢。
 跨版本的 mnesia 未必被新版接受，迁过去反而可能让节点起不来。
 
+### 升级了 jdk，但 nacos 还在用旧的
+
+`jdk` 和 `keepalived` 不由 `startup.sh` 托管，升级它们时不会停任何服务。
+而 nacos 跑在这个 JDK 上 —— Linux 下替换掉已被打开的文件不影响运行中的
+进程，所以 nacos 会继续用旧 JDK 直到重启为止。换句话说升级不会打断服务，
+但也不会立刻生效。要让它用上新 JDK：
+
+```bash
+cd ~/sprixinSoft && bash shutdown.sh 3 && bash startup.sh 3
+```
+
+keepalived 同理，若正在以管理员身份运行，需由管理员重启才会用上新二进制。
+
 ### 升级后想退回旧版本
 
 若用 `upgrade.sh` 升级，旧版本目录会原样保留，回滚三条命令：
