@@ -188,6 +188,84 @@ keepalived 收发 VRRP 报文需要 `CAP_NET_ADMIN`/`CAP_NET_RAW`，
 普通用户无法启动，这是正常现象。自检只验证二进制可执行与配置可解析。
 实际启用属于需要管理员权限的运维操作，参见 `KEEPALIVED-USAGE.md`。
 
+### 改了 rabbitmq 密码，服务起得来但连不上
+
+先看 `rabbitmq.conf` 里那行密码有没有引号：
+
+```bash
+grep default_pass rabbitmq/etc/rabbitmq/rabbitmq.conf
+```
+
+该文件是 sysctl 格式，`#` 之后算行内注释。密码里带 `#` 又没加引号的话，
+会被从 `#` 处截断 —— 写的是 `FieldMQ#2026`，实际生效的只有 `FieldMQ`，
+而且启动日志一切正常，只有连接时才报认证失败。
+
+包里自带的写法是对的，照着加单引号即可：
+
+```
+default_pass = 'FieldMQ#2026'
+```
+
+改完要让它生效，得清掉已建好的账号库（账号会按配置重建）：
+
+```bash
+bash shutdown.sh 5
+rm -rf rabbitmq/var/lib/rabbitmq/mnesia
+bash startup.sh 5
+```
+
+已有队列和消息会一并清掉。若不想清库，就直接改运行中的密码：
+
+```bash
+ERTS=$(find rabbitmq/lib -maxdepth 1 -type d -name 'erts-*' | sort | tail -1)
+PATH="$ERTS/bin:$PATH" rabbitmq/sbin/rabbitmqctl change_password 用户名 '新密码'
+```
+
+### 直接执行 `rabbitmqctl` 报 `escript: No such file or directory`
+
+`rabbitmqctl` 要用随包的 Erlang，而它不在系统 PATH 里。`startup.sh`
+会自己补上，所以走脚本没问题；手工执行则需先补 PATH：
+
+```bash
+ERTS=$(find rabbitmq/lib -maxdepth 1 -type d -name 'erts-*' | sort | tail -1)
+PATH="$ERTS/bin:$PATH" rabbitmq/sbin/rabbitmqctl list_users
+```
+
+### 只想升级一个组件，不动其他服务
+
+```bash
+bash upgrade.sh --component redis redis-8.8.0.tar.gz
+```
+
+只停该组件，其余服务全程不受影响。组件包在控制台和访客页面单独提供，
+nginx 只有 4 MB，不必为换一个组件搬几百 MB 的整包。
+
+配置和数据原地保留：redis 的 `redis.conf`、nginx 的 `conf/` 与 `html/`、
+rabbitmq 的 `etc/`、nacos 的 `conf/` 与 `data/`、influxdb 的 `etc/` 与
+`var/` 都会带过去，现场改过的同名文件覆盖新版，新版独有的文件保留。
+
+升级时会在安装目录下生成一个回滚脚本，退回执行它就行：
+
+```bash
+bash ~/sprixinSoft/rollback-redis-<时间戳>.sh
+```
+
+不要手工只把 `redis.backup-<时间戳>` 目录换回去 —— redis 的 `dump.rdb`
+按 `dir ./` 落在安装根目录，不在 `redis/` 里面。新版 redis 会把它写成更高
+的 RDB 格式版本，只换回程序的话旧版读不了新格式，启动即报
+`Can't handle RDB format version 14` 然后退出。回滚脚本会把数据文件一并
+退回，所以用它。
+
+确认新版本没问题后，备份和回滚脚本可以一起删掉（删了就不能再回滚）：
+
+```bash
+rm -rf ~/sprixinSoft/redis.backup-<时间戳> ~/sprixinSoft/rollback-redis-<时间戳>.sh
+```
+
+rabbitmq 是例外：它的 `mnesia` 不迁，升级后是一个空库。队列和交换机由
+应用启动时自行声明，会自愈；账号则按 `rabbitmq.conf` 重建，不会丢。
+跨版本的 mnesia 未必被新版接受，迁过去反而可能让节点起不来。
+
 ### 升级后想退回旧版本
 
 若用 `upgrade.sh` 升级，旧版本目录会原样保留，回滚三条命令：

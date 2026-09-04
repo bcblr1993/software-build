@@ -100,8 +100,15 @@ LOG="$PARENT/upgrade-$STAMP.log"
 # 必要，也就少了一整类搬错的可能。
 if [ -n "$COMPONENT" ]; then
   # 组件 → 启停编号 / 端口 / 需保留的配置
+  # EXTRA 是该组件落在安装根目录、却不在组件目录里的数据文件。
+  # redis.conf 的 dir 是 ./，解析到的是进程工作目录也就是安装根目录，
+  # 于是 dump.rdb 躺在 redis/ 外面 —— 只备份组件目录的话它不在其中。
+  # 这不是小事：新版 redis 会把 RDB 写成更高的格式版本，回滚后旧版读不了
+  # 新格式，直接 "Can't handle RDB format version 14" 起不来。
+  EXTRA=""
   case "$COMPONENT" in
-    redis)      IDX=1; PORT=6379; KEEP="redis.conf" ;;
+    redis)      IDX=1; PORT=6379; KEEP="redis.conf"
+                EXTRA="dump.rdb appendonly.aof appendonlydir" ;;
     nginx)      IDX=2; PORT=9000; KEEP="conf html" ;;
     nacos)      IDX=3; PORT=8848; KEEP="conf data" ;;
     influxdb)   IDX=4; PORT=8086; KEEP="etc var" ;;
@@ -162,6 +169,16 @@ if [ -n "$COMPONENT" ]; then
   mv "$COMP_DIR" "$BK" || die "无法备份原目录"
   ok "原目录已备份为 $(basename "$BK")"
 
+  # 外置数据要一起留一份，否则回滚只换回了程序，数据还是新版写的格式
+  EXTRA_SAVED=""
+  for e in $EXTRA; do
+    if [ -e "$CURRENT/$e" ]; then
+      mkdir -p "$BK/.external"
+      cp -a "$CURRENT/$e" "$BK/.external/" && EXTRA_SAVED="$EXTRA_SAVED $e"
+    fi
+  done
+  [ -n "$EXTRA_SAVED" ] && ok "同时备份数据文件：$(echo $EXTRA_SAVED)"
+
   mkdir -p "$COMP_DIR"
   tar -xzf "$PKG" -C "$COMP_DIR" --strip-components 1 || {
     rm -rf "$COMP_DIR"; mv "$BK" "$COMP_DIR"
@@ -186,6 +203,27 @@ if [ -n "$COMPONENT" ]; then
       ok "$COMPONENT/$k"
     fi
   done
+
+  # 回滚脚本现在就写好，别等出事时让人现拼命令 —— 尤其是外置数据这一步，
+  # 漏掉的话 redis 会因为 RDB 格式比自己新而起不来，且报错发生在启动阶段，
+  # 看上去像是回滚本身失败了。脚本放在组件目录外，回滚时不会被自己删掉。
+  RB="$CURRENT/rollback-$COMPONENT-$STAMP.sh"
+  {
+    echo '#!/bin/bash'
+    echo "# 把 $COMPONENT 退回 $STAMP 升级前的状态。可反复执行。"
+    echo "set -e"
+    echo "cd \"$CURRENT\""
+    [ -n "$IDX" ] && echo "bash shutdown.sh $IDX || true"
+    echo "rm -rf \"$COMP_DIR\""
+    echo "cp -a \"$BK\" \"$COMP_DIR\""
+    echo "rm -rf \"$COMP_DIR/.external\""
+    for e in $EXTRA_SAVED; do
+      echo "rm -rf \"$CURRENT/$e\"; cp -a \"$BK/.external/$e\" \"$CURRENT/$e\""
+    done
+    [ -n "$IDX" ] && echo "bash startup.sh $IDX"
+    echo "echo '已退回 $STAMP 升级前的 $COMPONENT'"
+  } > "$RB"
+  chmod +x "$RB"
 
   step "启动 $COMPONENT"
   RC=0
@@ -212,15 +250,16 @@ if [ -n "$COMPONENT" ]; then
     echo "  $COMPONENT 升级完成，用时 $((T1 - T0)) 秒"
     echo "  其余服务全程未受影响"
     echo
-    echo "  确认无误后可删除备份："
-    echo "    rm -rf $BK"
+    echo "  日后若要退回，执行："
+    echo "    bash $RB"
+    echo
+    echo "  确认无误后可删除备份（删了就不能再回滚）："
+    echo "    rm -rf $BK $RB"
   else
     echo "  $COMPONENT 升级后未能就绪"
     echo
-    echo "  回滚（原目录完整保留）："
-    echo "    cd $CURRENT && bash shutdown.sh $IDX"
-    echo "    rm -rf $COMP_DIR && mv $BK $COMP_DIR"
-    echo "    cd $CURRENT && bash startup.sh $IDX"
+    echo "  回滚（程序与数据一并退回，原目录完整保留）："
+    echo "    bash $RB"
   fi
   echo "════════════════════════════════════════════════════════════"
   exit $RC
