@@ -18,6 +18,12 @@ from pathlib import Path
 #: 候选产物的公开名单。只记文件名，不记路径。
 PUBLIC_LIST = "public-artifacts.json"
 
+#: 可单独升级的组件，与 upgrade.sh --component 的白名单一致。
+#: dist/<arch>/software/ 下并非每个归档都是服务：ARM 的 compat-libs 是一包
+#: OpenSSL 1.0 兼容库，没有端口也没有配置，upgrade.sh 会直接拒绝它。把它
+#: 列进「单组件升级包」只会让人白下一趟。
+UPGRADABLE = {"redis", "nginx", "nacos", "influxdb", "rabbitmq", "keepalived", "jdk"}
+
 
 class PublicView:
     def __init__(self, workspace: Path, store, checklist_cls=None) -> None:
@@ -135,6 +141,8 @@ class PublicView:
                 # 归档名形如 redis-8.8.0.tar.gz，组件名取首个 - 之前的部分，
                 # 与 install.sh 的解析方式一致
                 name = f.name.split("-")[0]
+                if name not in UPGRADABLE:
+                    continue
                 out.append({
                     "component": name,
                     "filename": f.name,

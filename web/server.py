@@ -361,6 +361,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._api_artifacts()
 
+        if route == "/api/component-archives":
+            if self._require_auth() is None:
+                return
+            return self._api_component_archives()
+
         if route == "/api/members":
             return self._api_members()
 
@@ -860,6 +865,21 @@ class Handler(BaseHTTPRequestHandler):
         for it in items:
             it["public"] = it.get("name") in public
         self._send_json({"artifacts": items})
+
+    def _api_component_archives(self) -> None:
+        """单组件升级包。
+
+        与访客页面取自同一处（dist/<arch>/software/），只是控制台这边
+        额外给出路径，好复用既有的签名下载链接。
+        """
+        try:
+            items = self._public_view().components()
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+        ws = Path(self.server.workspace)
+        for it in items:
+            it["path"] = str(ws / "dist" / it["arch"] / "software" / it["filename"])
+        self._send_json({"components": items})
 
     def _checklist(self):
         from sprixin_build.checklist import Checklist

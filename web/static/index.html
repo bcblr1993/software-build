@@ -284,6 +284,16 @@
       <p style="font-size:13px;font-weight:500;margin:0 0 8px">候选产物（可清理）</p>
       <div id="art-list"><p class="note">暂无候选产物</p></div>
     </div>
+
+    <div style="margin-top:18px">
+      <p style="font-size:13px;font-weight:500;margin:0 0 4px">单组件升级包</p>
+      <p class="note" style="margin:0 0 8px">
+        现场只换一个组件时用，几 MB 到几十 MB，不必搬整包。发到目标机后：
+        <code style="font-family:var(--mono);font-size:11px">bash upgrade.sh -c redis redis-8.8.0.tar.gz</code>
+        —— 只停该组件，其余服务照常运行。访客页面同样可取。
+      </p>
+      <div id="cmp-list"><p class="note">加载中…</p></div>
+    </div>
   </div>
 
   <div class="card">
@@ -696,7 +706,8 @@ async function loadCapacity() {
 }
 
 async function loadReleases() {
-  const [rel, art] = await Promise.all([api('/api/releases'), api('/api/artifacts')]);
+  const [rel, art, cmp] = await Promise.all([
+    api('/api/releases'), api('/api/artifacts'), api('/api/component-archives')]);
 
   if (rel.ok && rel.data.releases && rel.data.releases.length) {
     // 版本里装的是哪些组件、各自什么版本 —— 事后被问得最多的就是这个，
@@ -756,6 +767,30 @@ async function loadReleases() {
     });
   } else {
     $('#art-list').innerHTML = '<p class="note">暂无候选产物</p>';
+  }
+
+  if (cmp.ok && cmp.data.components && cmp.data.components.length) {
+    // 按组件归组：同一个 redis 的两个架构挨着放，取包的人一眼能对上，
+    // 而不是在一串按文件名排序的条目里自己挑
+    const byComp = {};
+    cmp.data.components.forEach(c => (byComp[c.component] ||= []).push(c));
+    $('#cmp-list').innerHTML = Object.keys(byComp).sort().map(name => `
+      <div style="padding:7px 0;border-bottom:1px solid var(--line)">
+        <div class="row" style="gap:8px">
+          <strong style="font-size:13px;min-width:92px">${name}</strong>
+          ${byComp[name].map(c => `
+            <span class="row" style="gap:5px">
+              <span class="tag">${c.arch}</span>
+              <span class="note" style="font-family:var(--mono);font-size:11px">${c.filename}</span>
+              <span class="note">${(c.size/1048576).toFixed(1)} MB</span>
+              <button onclick="getLink('${c.path.replace(/'/g, "\\'")}', true)">下载</button>
+              <button onclick="getLink('${c.path.replace(/'/g, "\\'")}', false)">复制链接</button>
+            </span>`).join('')}
+        </div>
+      </div>`).join('');
+  } else {
+    $('#cmp-list').innerHTML =
+      '<p class="note">暂无组件包 —— 打包后自动出现</p>';
   }
 }
 
