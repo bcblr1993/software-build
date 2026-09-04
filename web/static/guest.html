@@ -88,6 +88,14 @@
   <p class="sub">已通过验证并正式发布，可用于现场部署</p>
   <div id="releases"><p class="empty">加载中…</p></div>
 
+  <div id="components-wrap" style="margin-top:28px;display:none">
+    <h2>单组件升级包</h2>
+    <p class="sub">只升级某一个组件时使用。下载后执行
+      <code style="font-family:var(--mono);font-size:12px">bash upgrade.sh --component &lt;组件名&gt; &lt;归档&gt;</code>
+      即可，只停该组件，其余服务照常运行。</p>
+    <div id="components"></div>
+  </div>
+
   <div id="candidates-wrap" style="margin-top:28px;display:none">
     <h2>测试版本</h2>
     <p class="sub">尚未正式发布的构建产物，仅供测试</p>
@@ -169,6 +177,34 @@ async function load() {
           </div>`).join('')}
       </div>
     </div>`).join('') : '<p class="empty">尚无正式版本</p>';
+
+  // 单组件归档：只升一个组件时不必下整包
+  const comps2 = data.components || [];
+  if (comps2.length) {
+    const byArch = {};
+    comps2.forEach(c => { (byArch[c.arch] = byArch[c.arch] || []).push(c); });
+    $('#components-wrap').style.display = '';
+    $('#components').innerHTML = Object.keys(byArch).sort().map(arch => `
+      <div class="item">
+        <div class="head">
+          <span class="tag arch">${arch}</span>
+          <span class="meta">按需下载，只升一个组件时不必下整包</span>
+        </div>
+        <table style="width:100%;margin-top:12px;font-size:13px">
+          ${byArch[arch].sort((a,b) => a.component.localeCompare(b.component)).map(c => `
+            <tr>
+              <td style="padding:6px 0"><b>${c.component}</b></td>
+              <td class="file" style="margin:0">${c.filename}</td>
+              <td style="text-align:right;color:var(--muted);white-space:nowrap">${mb(c.size)}</td>
+              <td style="text-align:right;white-space:nowrap">
+                ${c.download ? `<button onclick="location.href='${c.download.url}'">下载</button>
+                  <button onclick="copy(${JSON.stringify(c.download.curl).replace(/"/g,'&quot;')}, this)">复制命令</button>
+                  <span class="msg"></span>` : ''}
+              </td>
+            </tr>`).join('')}
+        </table>
+      </div>`).join('');
+  }
 
   const art = data.artifacts || [];
   if (art.length) {

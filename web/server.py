@@ -943,10 +943,20 @@ class Handler(BaseHTTPRequestHandler):
                 a["download"] = self._sign_public(
                     auth, "artifact", a["arch"], a["filename"], host)
 
+        # 单组件归档：现场多数时候只升一个组件，不必为此下整包
+        comps = pv.components()
+        for c in comps:
+            full = (Path(self.server.workspace) / "dist" / c["arch"]
+                    / "software" / c["filename"])
+            if full.is_file():
+                c["download"] = self._sign_public(
+                    auth, "component", c["arch"], c["filename"], host)
+
         self._send_json({
             "package": "sprixinSoft",
             "releases": releases,
             "artifacts": artifacts,
+            "components": comps,
         })
 
     def _sign_public(self, auth, kind: str, key: str, filename: str, host: str) -> dict:
@@ -993,6 +1003,9 @@ class Handler(BaseHTTPRequestHandler):
             if name not in self._public_view().published_names():
                 return self._send_json({"error": "该产物未公开"}, 403)
             target = ws / "dist" / key / name
+        elif kind == "component":
+            # 单组件归档随正式版本一同公开，无需另行勾选：它就是版本的一部分
+            target = ws / "dist" / key / "software" / name
         else:
             return self._send_json({"error": "参数不合法"}, 400)
 

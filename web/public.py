@@ -112,6 +112,37 @@ class PublicView:
             out.append(g)
         return out
 
+    def components(self, arch: str = "") -> list[dict]:
+        """各架构下可单独下载的组件归档。
+
+        现场多数时候只升一个 redis 或 nginx，为此下载数百 MB 的整包并不
+        合算 —— nginx 只有 4 MB，在内网 1M 出口上是几秒与十几分钟的差别。
+        这些归档本就是打包的中间产物，此处只是把它们暴露出来。
+        """
+        out = []
+        dist = self.workspace / "dist"
+        if not dist.is_dir():
+            return out
+        for arch_dir in sorted(dist.iterdir()):
+            if not arch_dir.is_dir():
+                continue
+            if arch and arch_dir.name != arch:
+                continue
+            soft = arch_dir / "software"
+            if not soft.is_dir():
+                continue
+            for f in sorted(soft.glob("*.tar.gz")):
+                # 归档名形如 redis-8.8.0.tar.gz，组件名取首个 - 之前的部分，
+                # 与 install.sh 的解析方式一致
+                name = f.name.split("-")[0]
+                out.append({
+                    "component": name,
+                    "filename": f.name,
+                    "arch": arch_dir.name,
+                    "size": f.stat().st_size,
+                })
+        return out
+
     def artifacts(self) -> list[dict]:
         """已公开的候选产物。"""
         names = self.published_names()

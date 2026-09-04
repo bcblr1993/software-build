@@ -3,9 +3,15 @@
 # SprixinSoft 现场升级
 #
 # 用法：
-#   bash upgrade.sh <新版安装包.tar.gz>          交互式升级
-#   bash upgrade.sh <新版安装包.tar.gz> --dry-run  只预检并展示计划，不改动任何东西
-#   bash upgrade.sh <新版安装包.tar.gz> --yes      不交互，用于无人值守
+#   bash upgrade.sh <新版安装包.tar.gz>            整包升级
+#   bash upgrade.sh <新版安装包.tar.gz> --dry-run   只预检并展示计划，不改动任何东西
+#   bash upgrade.sh <新版安装包.tar.gz> --yes       不交互，用于无人值守
+#
+#   bash upgrade.sh --component redis redis-8.8.0.tar.gz    只升一个组件
+#
+# 单组件升级用于最常见的场合 —— 只换 redis / nginx / rabbitmq 中的一个。
+# 它只停这一个服务，其余照常运行，停机从分钟级降到几十秒；下载量也从
+# 整包的数百 MB 降到几 MB 至几十 MB。配置与数据原地保留，不做目录切换。
 #
 # 做法是「并行部署 + 原子切换」：新版本先装到另一个目录，数据与配置在
 # 服务照常运行期间迁移完毕，最后停一次服务、切一次软链、启一次服务。
@@ -37,6 +43,7 @@ PKG=""
 DRY_RUN=0
 ASSUME_YES=0
 KEEP_OLD=3
+COMPONENT=""
 
 # ── 参数 ────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -44,6 +51,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --yes|-y)  ASSUME_YES=1 ;;
     --keep-old) shift; KEEP_OLD="${1:-3}" ;;
+    --component|-c) shift; COMPONENT="${1:-}" ;;
     -h|--help)
       sed -n '2,30p' "$0" | sed 's/^#\s\?//'
       exit 0 ;;
@@ -85,8 +93,141 @@ LINK="$CURRENT"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$PARENT/upgrade-$STAMP.log"
 
+# ── 单组件升级 ──────────────────────────────────────────────────────
+#
+# 与整包升级的不同：不切目录、不动其他组件，只把这一个组件的目录换掉。
+# 配置与数据留在原处 —— 它们本就在组件目录之外或被显式保留，没有搬家的
+# 必要，也就少了一整类搬错的可能。
+if [ -n "$COMPONENT" ]; then
+  # 组件 → 启停编号 / 端口 / 需保留的配置
+  case "$COMPONENT" in
+    redis)      IDX=1; PORT=6379; KEEP="redis.conf" ;;
+    nginx)      IDX=2; PORT=9000; KEEP="conf html" ;;
+    nacos)      IDX=3; PORT=8848; KEEP="conf data" ;;
+    influxdb)   IDX=4; PORT=8086; KEEP="etc var" ;;
+    rabbitmq)   IDX=5; PORT=5672; KEEP="etc" ;;
+    keepalived) IDX="";  PORT="";   KEEP="etc" ;;
+    jdk)        IDX="";  PORT="";   KEEP="" ;;
+    *) die "未知组件: $COMPONENT（可用：redis nginx nacos influxdb rabbitmq keepalived jdk）" ;;
+  esac
+
+  COMP_DIR="$CURRENT/$COMPONENT"
+  [ -d "$COMP_DIR" ] || die "当前安装中没有 $COMPONENT 目录"
+
+  echo "════════════════════════════════════════════════════════════"
+  echo "  SprixinSoft 单组件升级"
+  echo "  组件   : $COMPONENT"
+  echo "  时间   : $(date '+%F %T')"
+  echo "  安装于 : $CURRENT"
+  echo "  新归档 : $(basename "$PKG")"
+  echo "  运行者 : $(id -un) (uid=$(id -u))"
+  [ "$DRY_RUN" = 1 ] && echo "  模式   : 预演，不做任何改动"
+  echo "════════════════════════════════════════════════════════════"
+
+  step "预检"
+  tar -tzf "$PKG" >/dev/null 2>&1 || die "归档无法读取，可能未下载完整"
+  TOP="$(tar -tzf "$PKG" 2>/dev/null | head -1 | cut -d/ -f1)"
+  info "归档顶层目录：$TOP"
+  ok "归档完整"
+
+  info "将保留：$( [ -n "$KEEP" ] && echo "$KEEP" || echo "（无需保留的配置）" )"
+  [ -n "$PORT" ] && info "升级期间 $PORT 端口会中断，其余服务不受影响"
+  info "其余组件保持运行，不做目录切换"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    step "预演到此为止"
+    info "如无异议，去掉 --dry-run 重新执行"
+    exit 0
+  fi
+
+  if [ "$ASSUME_YES" != 1 ]; then
+    printf '   确认升级 %s？其余服务不受影响 [y/N] ' "$COMPONENT"
+    read -r ans
+    case "$ans" in y|Y|yes) ;; *) info "已取消"; exit 0 ;; esac
+  fi
+
+  BK="$CURRENT/$COMPONENT.backup-$STAMP"
+  T0=$(date +%s)
+
+  step "停止 $COMPONENT"
+  if [ -n "$IDX" ] && [ -f "$CURRENT/shutdown.sh" ]; then
+    ( cd "$CURRENT" && bash shutdown.sh "$IDX" ) 2>&1 | sed 's/^/   /'
+    sleep 2
+  else
+    info "该组件无需停服务"
+  fi
+
+  step "备份并替换"
+  # 整目录改名而非删除：出问题时换回来即可，且改名是原子的
+  mv "$COMP_DIR" "$BK" || die "无法备份原目录"
+  ok "原目录已备份为 $(basename "$BK")"
+
+  mkdir -p "$COMP_DIR"
+  tar -xzf "$PKG" -C "$COMP_DIR" --strip-components 1 || {
+    rm -rf "$COMP_DIR"; mv "$BK" "$COMP_DIR"
+    die "解压失败，已还原原目录"
+  }
+  ok "新版本已解压"
+
+  step "恢复配置与数据"
+  for k in $KEEP; do
+    if [ -e "$BK/$k" ]; then
+      # 目录做合并：现场文件覆盖新版同名，新版独有的保留 ——
+      # 新版本引入的配置文件不该因为恢复现场配置而消失。
+      if [ -d "$BK/$k" ]; then
+        mkdir -p "$COMP_DIR/$k"
+        ( cd "$BK/$k" && find . -type f | sed 's|^\./||' ) | while IFS= read -r rel; do
+          mkdir -p "$COMP_DIR/$k/$(dirname "$rel")"
+          cp -a "$BK/$k/$rel" "$COMP_DIR/$k/$rel"
+        done
+      else
+        cp -a "$BK/$k" "$COMP_DIR/$k"
+      fi
+      ok "$COMPONENT/$k"
+    fi
+  done
+
+  step "启动 $COMPONENT"
+  RC=0
+  if [ -n "$IDX" ]; then
+    ( cd "$CURRENT" && bash startup.sh "$IDX" ) 2>&1 | tail -6 | sed 's/^/   /'
+    if [ -n "$PORT" ]; then
+      READY=0
+      for i in $(seq 1 40); do
+        sleep 3
+        if (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -q ":$PORT\b"; then
+          READY=1; break
+        fi
+      done
+      [ "$READY" = 1 ] && ok "$PORT 已监听" || { warn "$PORT 未监听"; RC=1; }
+    fi
+  else
+    info "该组件不由 startup.sh 托管，跳过启动"
+  fi
+
+  T1=$(date +%s)
+  echo
+  echo "════════════════════════════════════════════════════════════"
+  if [ "$RC" -eq 0 ]; then
+    echo "  $COMPONENT 升级完成，用时 $((T1 - T0)) 秒"
+    echo "  其余服务全程未受影响"
+    echo
+    echo "  确认无误后可删除备份："
+    echo "    rm -rf $BK"
+  else
+    echo "  $COMPONENT 升级后未能就绪"
+    echo
+    echo "  回滚（原目录完整保留）："
+    echo "    cd $CURRENT && bash shutdown.sh $IDX"
+    echo "    rm -rf $COMP_DIR && mv $BK $COMP_DIR"
+    echo "    cd $CURRENT && bash startup.sh $IDX"
+  fi
+  echo "════════════════════════════════════════════════════════════"
+  exit $RC
+fi
+
 echo "════════════════════════════════════════════════════════════"
-echo "  SprixinSoft 升级"
+echo "  SprixinSoft 整包升级"
 echo "  时间   : $(date '+%F %T')"
 echo "  当前   : $CURRENT"
 echo "  新包   : $(basename "$PKG")"
