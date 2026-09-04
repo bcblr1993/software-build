@@ -288,6 +288,28 @@ logfile "/home/用户名/sprixinSoft/logs/redis/redis.log"
 是一整块数据盘，不该擅自搬）。升级时会明确提示，若打算回滚，需自己先备份
 该目录。
 
+### ARM 机器上 redis 起不来，日志说内核有 bug 会导致数据损坏
+
+日志形如：
+
+```
+# WARNING Your kernel has a bug that could lead to data corruption during
+  background save. Please upgrade to the latest stable kernel.
+# Redis will now exit to prevent data corruption.
+```
+
+这是 redis 在 aarch64 上开机自检内核的 COW（写时复制）缺陷。带该缺陷的内核在
+后台存盘（bgsave）时可能写出损坏的 RDB，所以 redis 宁可拒绝启动。**不要**用
+`ignore-warnings ARM64-COW-BUG` 把它盖掉 —— 那是把一道防数据损坏的闸门拆了，
+而 RDB 损坏往往到下次重启加载时才发现。
+
+正确做法是换用打过补丁的内核，各发行版的稳定内核基本都已修复。确认本机是否
+真受影响，可先升级内核再启动 redis 试试。
+
+顺带一提：在 x86 上用 qemu 模拟跑 ARM 容器时，这个自检会误报（qemu 对 fork /
+COW 的模拟不够忠实），跟目标机内核无关。所以 ARM 版的 redis 只能在真实 ARM
+机器上验证，容器里验不了。
+
 ### 升级了 jdk，但 nacos 还在用旧的
 
 `jdk` 和 `keepalived` 不由 `startup.sh` 托管，升级它们时不会停任何服务。
