@@ -106,6 +106,7 @@ if [ -n "$COMPONENT" ]; then
   # 这不是小事：新版 redis 会把 RDB 写成更高的格式版本，回滚后旧版读不了
   # 新格式，直接 "Can't handle RDB format version 14" 起不来。
   EXTRA=""
+  EXTRA_ELSEWHERE=""
   case "$COMPONENT" in
     redis)      IDX=1; PORT=6379; KEEP="redis.conf"
                 EXTRA="dump.rdb appendonly.aof appendonlydir" ;;
@@ -120,6 +121,23 @@ if [ -n "$COMPONENT" ]; then
 
   COMP_DIR="$CURRENT/$COMPONENT"
   [ -d "$COMP_DIR" ] || die "当前安装中没有 $COMPONENT 目录"
+
+  # EXTRA 默认按包内 redis.conf 的写法（dir ./，即安装根目录）推定。现场若把
+  # dir 指到数据盘，写死的文件名就找不到东西 —— 而"找不到"是静默的，回滚时
+  # 才以旧版读不了新 RDB 的形式爆出来。所以这里照配置实际值来判断。
+  if [ "$COMPONENT" = redis ] && [ -f "$COMP_DIR/redis.conf" ]; then
+    RDIR=$(awk '$1=="dir"{v=$2} END{print v}' "$COMP_DIR/redis.conf")
+    RDB=$(awk '$1=="dbfilename"{v=$2} END{print v}' "$COMP_DIR/redis.conf")
+    [ -n "$RDB" ] || RDB=dump.rdb
+    case "$RDIR" in
+      ""|"./"|"."|"$CURRENT"|"$CURRENT/")
+        EXTRA="$RDB appendonly.aof appendonlydir" ;;
+      *)
+        # 数据在别处，不擅自去搬 —— 那可能是一整块数据盘
+        EXTRA=""
+        EXTRA_ELSEWHERE="$RDIR" ;;
+    esac
+  fi
 
   echo "════════════════════════════════════════════════════════════"
   echo "  SprixinSoft 单组件升级"
@@ -178,6 +196,11 @@ if [ -n "$COMPONENT" ]; then
     fi
   done
   [ -n "$EXTRA_SAVED" ] && ok "同时备份数据文件：$(echo $EXTRA_SAVED)"
+  if [ -n "$EXTRA_ELSEWHERE" ]; then
+    warn "redis 数据目录被指到 $EXTRA_ELSEWHERE，不在安装目录内，未纳入备份。"
+    warn "     升级本身不受影响（新版能读旧 RDB），但若要回滚，需先自行"
+    warn "     备份该目录 —— 新版写出的 RDB 格式旧版读不了，直接回滚会起不来。"
+  fi
 
   mkdir -p "$COMP_DIR"
   tar -xzf "$PKG" -C "$COMP_DIR" --strip-components 1 || {

@@ -266,6 +266,28 @@ rabbitmq 是例外：它的 `mnesia` 不迁，升级后是一个空库。队列�
 应用启动时自行声明，会自愈；账号则按 `rabbitmq.conf` 重建，不会丢。
 跨版本的 mnesia 未必被新版接受，迁过去反而可能让节点起不来。
 
+### 把 redis 的 dir 改到数据盘后起不来
+
+`redis.conf` 里的 `logfile` 是相对路径 `./logs/redis/redis.log`，而 redis
+是先切到 `dir` 再解析它的。`dir` 一改，日志路径跟着漂到数据盘上，那儿没有
+`logs/redis/` 目录，于是启动即报：
+
+```
+*** FATAL CONFIG FILE ERROR ***
+Can't open the log file: No such file or directory
+```
+
+改 `dir` 时把 `logfile` 一并写成绝对路径即可：
+
+```
+dir /data/redis
+logfile "/home/用户名/sprixinSoft/logs/redis/redis.log"
+```
+
+另外要留意：数据挪到安装目录之外后，`upgrade.sh` 不会把它纳入备份（那可能
+是一整块数据盘，不该擅自搬）。升级时会明确提示，若打算回滚，需自己先备份
+该目录。
+
 ### 升级了 jdk，但 nacos 还在用旧的
 
 `jdk` 和 `keepalived` 不由 `startup.sh` 托管，升级它们时不会停任何服务。
