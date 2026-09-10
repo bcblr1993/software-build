@@ -26,6 +26,41 @@ ERTS_DIR="$(find "$BASE_DIR/rabbitmq/lib" -maxdepth 1 -type d -name 'erts-*' | s
 export JAVA_HOME="$BASE_DIR/jdk"
 export PATH="$JAVA_HOME/bin${ERTS_DIR:+:$ERTS_DIR/bin}:$PATH"
 
+# 地址空间上限：现场遇到过软限制被压到 16 GB 的机器，rabbitmq 起不来。
+#
+# BEAM 占用的虚拟地址空间随核数放大 —— glibc 的 malloc arena 上限是
+# 8×核数，每个预留 64 MB 地址空间；Erlang 各类分配器又按调度器数量各开
+# 一份 carrier。这些只占地址、不占物理内存，所以 free 看着一片宽裕，
+# mmap 却已经无地可批。redis 与 nginx 线程少、nacos 有 -Xmx 封顶，都碰
+# 不到这个天花板，唯独 BEAM 会 —— 表现为只有 rabbitmq 起不来。
+#
+# 报错还具有相当的误导性：Erlang 会说 "OpenSSL might not be installed"，
+# 而真实原因是 dlopen 映射 libcrypto 时拿不到地址空间（ENOMEM）。
+#
+# 软限制抬到硬上限不需要任何权限，能自愈就自愈；抬不动才提示。
+raise_addr_space() {
+  local soft hard
+  soft=$(ulimit -S -v 2>/dev/null) || return 0
+  [ "$soft" = unlimited ] && return 0
+
+  hard=$(ulimit -H -v 2>/dev/null)
+  if [ "$hard" = unlimited ]; then
+    ulimit -S -v unlimited 2>/dev/null && return 0
+  elif [ -n "$hard" ] && [ "$hard" != "$soft" ]; then
+    ulimit -S -v "$hard" 2>/dev/null && soft="$hard"
+  fi
+
+  # 抬不上去或抬完仍偏低时提示。24 GB 是经验阈值：低于此值 BEAM 在多核
+  # 机器上容易起不来，且失败信息指向 OpenSSL，排查会走弯路。
+  soft=$(ulimit -S -v 2>/dev/null)
+  if [ "$soft" != unlimited ] && [ -n "$soft" ] && [ "$soft" -lt 25165824 ] 2>/dev/null; then
+    echo "warning: address space limit is $((soft / 1024)) MB (ulimit -v), rabbitmq may fail to start"
+    echo "         ask the administrator to raise it in /etc/security/limits.d/, or run:"
+    echo "         MALLOC_ARENA_MAX=2 ERL_FLAGS='+S 8:8' bash startup.sh 5"
+  fi
+}
+raise_addr_space
+
 # 此处不再导出 LD_LIBRARY_PATH。
 #
 # 历史版本导出 "$BASE_DIR/nginx/lib" 让包内组件找到随包的 OpenSSL，

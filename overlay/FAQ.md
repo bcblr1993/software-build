@@ -34,6 +34,61 @@ cat rabbitmq/etc/rabbitmq/enabled_plugins     # 应为 [rabbitmq_management].
 ./rabbitmq/sbin/rabbitmq-server -detached
 ```
 
+### rabbitmq 起不来，报 `Cannot allocate memory` 或说 OpenSSL 没装
+
+日志里通常是这两行，后面跟着几十行 Erlang 调用栈：
+
+```
+eheap_alloc: Cannot allocate 4118704 bytes of memory (of type "heap")
+Failed to load NIF library .../priv/lib/crypto:
+  'libcrypto.so.1.1: failed to map segment from shared object: Cannot allocate memory'
+OpenSSL might not be installed on this system.
+```
+
+**最后那句是 Erlang 的通用兜底文案，跟本次失败无关，按它去查 OpenSSL 会白费
+功夫。** 真正的错误是 `Cannot allocate memory` —— 库找到了，是 `mmap` 被拒。
+后面的调用栈全是雪崩（NIF 加载失败 → `strong_rand_bytes/1` 未定义 → 监督树
+垮掉），根因只在最上面。
+
+先确认不是链接问题：
+
+```bash
+ldd ~/sprixinSoft/rabbitmq/lib/lib/crypto-*/priv/lib/crypto.so
+```
+
+每行都有实际路径、没有 `not found`，就能排除 OpenSSL 这条线。
+
+绝大多数情况下真凶是**地址空间上限**，而不是内存不够：
+
+```bash
+free -m           # 往往显示还剩几百 GB，具有迷惑性
+ulimit -v         # 看这个
+```
+
+BEAM 占用的虚拟地址空间随核数放大 —— glibc 的 malloc arena 上限是 8×核数，
+每个预留 64 MB 地址空间；Erlang 各类分配器又按调度器数量各开一份 carrier。
+这些只占地址、不占物理内存，所以 `free` 看着宽裕，`mmap` 却已无地可批。
+redis 与 nginx 线程少、nacos 有 `-Xmx` 封顶，都碰不到这个天花板，
+**唯独 rabbitmq 会** —— 表现为五个服务里只有它起不来。
+
+`startup.sh` 会自动把软限制抬到硬上限，多数机器上不需要人工干预。若它打印了
+`warning: address space limit is ... MB`，说明硬上限也偏低，两条路：
+
+请管理员在 `/etc/security/limits.d/` 里放开（根治）：
+
+```
+sprixin  -  as  unlimited
+```
+
+或者不改系统，让 BEAM 少占地址空间：
+
+```bash
+MALLOC_ARENA_MAX=2 ERL_FLAGS='+S 8:8' bash startup.sh 5
+```
+
+前者把 glibc arena 从「8×核数」压到 2 个，省地址空间最见效；后者把调度器
+固定为 8 个而不跟着核数走。
+
 ### rabbitmq 起不来，报 `unable to connect to epmd (port 4369)`
 
 诊断信息里会写 `attempted to contact: [rabbit@主机名]`。
