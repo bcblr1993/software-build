@@ -55,3 +55,5 @@ node_modules/
 # ── 本地工具配置 ─────────────────────────────────────────────
 .claude/settings.local.json
 .claude/scheduled_tasks*
+out/nginx-upgrade/nginx-1.31.3.tar.gz
+out/*.tar.gz
