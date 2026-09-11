@@ -131,6 +131,30 @@ else
 fi
 
 echo
+echo "── 地址空间上限 ──"
+# 现场遇到过软限制被压到 16 GB 的机器：内存余量几百 GB，rabbitmq 却起不来，
+# 报的还是 "OpenSSL might not be installed" —— 实际是 dlopen 映射 libcrypto
+# 时拿不到地址空间。BEAM 的地址空间用量随核数放大（glibc 的 malloc arena
+# 上限是 8×核数、每个预留 64 MB），别的服务线程少或有堆上限，都碰不到这个
+# 天花板，唯独它会。提前报出来，免得到时顺着 OpenSSL 查一圈。
+as_soft="$(ulimit -S -v 2>/dev/null)"
+as_hard="$(ulimit -H -v 2>/dev/null)"
+if [ "$as_soft" = unlimited ] || [ -z "$as_soft" ]; then
+  pass "地址空间不受限"
+elif [ "$as_hard" = unlimited ]; then
+  pass "软限制 $((as_soft / 1024)) MB，硬上限不受限（startup.sh 启动时会自动抬高）"
+else
+  need=$(( $(nproc 2>/dev/null || echo 8) * 8 * 64 * 1024 ))
+  if [ "$as_hard" -lt "$need" ] 2>/dev/null; then
+    echo "[WARN] 地址空间硬上限 $((as_hard / 1024)) MB，本机 $(nproc 2>/dev/null || echo ?) 核"
+    echo "    rabbitmq 可能起不来。startup.sh 会自动设 MALLOC_ARENA_MAX=2 缓解；"
+    echo "    根治请管理员在 /etc/security/limits.d/ 中放开：$(id -un)  -  as  unlimited"
+  else
+    pass "地址空间硬上限 $((as_hard / 1024)) MB，够用"
+  fi
+fi
+
+echo
 echo "── 系统前置依赖 ──"
 # nacos 的 JRaft 依赖 RocksDB，其 JNI 原生库从 jar 解压到临时目录后加载，
 # 无法为其设置 rpath，只能由系统提供 C++ 运行时。系统若为最小化安装而

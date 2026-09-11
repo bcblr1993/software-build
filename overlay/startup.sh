@@ -50,13 +50,25 @@ raise_addr_space() {
     ulimit -S -v "$hard" 2>/dev/null && soft="$hard"
   fi
 
-  # 抬不上去或抬完仍偏低时提示。24 GB 是经验阈值：低于此值 BEAM 在多核
-  # 机器上容易起不来，且失败信息指向 OpenSSL，排查会走弯路。
   soft=$(ulimit -S -v 2>/dev/null)
-  if [ "$soft" != unlimited ] && [ -n "$soft" ] && [ "$soft" -lt 25165824 ] 2>/dev/null; then
-    echo "warning: address space limit is $((soft / 1024)) MB (ulimit -v), rabbitmq may fail to start"
-    echo "         ask the administrator to raise it in /etc/security/limits.d/, or run:"
-    echo "         MALLOC_ARENA_MAX=2 ERL_FLAGS='+S 8:8' bash startup.sh 5"
+  [ "$soft" = unlimited ] && return 0
+  [ -n "$soft" ] || return 0
+
+  # 硬上限也卡着，抬不到 unlimited。与其只告警然后眼看它起不来，不如先自救：
+  # 地址空间的大头是 glibc 的 malloc arena —— 上限 8×核数、每个预留 64 MB，
+  # 96 核的机器光这一项就是 48 GB。压到 2 个后降到 128 MB 量级，多数受限
+  # 机器就够用了。
+  #
+  # 代价是 malloc 并发度下降。只在地址空间确实受限时才设，正常机器不受影响；
+  # 而且此时的替代方案是服务根本起不来，这个取舍是划算的。
+  export MALLOC_ARENA_MAX=2
+  echo "notice: address space limited to $((soft / 1024)) MB (ulimit -v), applied MALLOC_ARENA_MAX=2"
+
+  # 低于 4 GB 时，压了 arena 恐怕也不够，明确告诉现场该找谁。
+  if [ "$soft" -lt 4194304 ] 2>/dev/null; then
+    echo "warning: this may still be too low for rabbitmq"
+    echo "         ask the administrator to raise it in /etc/security/limits.d/:"
+    echo "             $(id -un)  -  as  unlimited"
   fi
 }
 raise_addr_space
